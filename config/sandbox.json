@@ -1,0 +1,20 @@
+{
+  "Region": "us-east-1",
+  "HistoryStackName": "athena-audit-history",
+  "EventsStackName": "athena-audit-events",
+  "CodeBucket": "cf-templates-1c4bkn5kqsera-us-east-1",
+  "Version": "latest",
+  "AuditBucket": "aws-logs-123456789-us-east-1",
+  "CloudTrailBucket": "aws-logs-123456789-us-east-1",
+  "CloudTrailFolder": "athena-cloudtrail/AWSLogs/123456789/CloudTrail",
+  "DatabaseName": "athena_events",
+  "EventsFolder": "athena_audit/events",
+  "HistoryFolder": "athena_audit/history",
+  "REGIONS": "us-east-1",
+  "Workgroup": "primary",
+  "AthenaOutputFolder": "athena_audit/query_results",
+  "AthenaOutputBucket": "aws-athena-query-results-123456789-us-east-1-d4hh5d2j",
+  "KmsKeyArn": "",
+  "WorkgroupsFilter": "idc",
+  "IdcSecretArn": "arn:aws:secretsmanager:us-east-1:123456789:secret:athena-audit/idc-tokens-JuAMvr"
+}

@@ -1,0 +1,150 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Parameters:
+  AuditBucket:
+    Type: String
+    Description: The S3 bucket to store athena audit output (history data)
+  HistoryFolder:
+    Type: String
+    Description: The S3 folder (path) to store history data under
+    Default: 'athena_audit/history'
+  CodeBucket:
+    Type: String
+    Description: The S3 bucket where the Lambda code package is stored
+  KmsKeyArn:
+    Type: String
+    Description: The ARN of the KMS key used to encrypt S3 objects
+    Default: ''
+  WorkgroupsFilter:
+    Type: String
+    Description: Only process workgroups whose name contains this string (case-insensitive). Leave empty for all workgroups.
+    Default: ''
+  IdcSecretArn:
+    Type: String
+    Description: ARN of the Secrets Manager secret holding cihi_auth TIP tokens for IDC workgroup access. Leave empty to skip IDC workgroups.
+    Default: ''
+  Version:
+    Type: String
+    Description: The version of the athena audit code
+    Default: 'latest'
+
+Conditions:
+  HasKmsKey: !Not [!Equals [!Ref KmsKeyArn, '']]
+  HasIdcSecret: !Not [!Equals [!Ref IdcSecretArn, '']]
+
+Resources:
+  AthenaHistoryLogGroup:
+    Type: 'AWS::Logs::LogGroup'
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AWS::StackName}-AthenaHistoryLambdaFunction'
+      RetentionInDays: 14
+
+  AthenaHistoryLambdaRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AthenaHistoryLambdaPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:DeleteObject
+                  - s3:GetObjectVersion
+                Resource: !Sub 'arn:aws:s3:::${AuditBucket}/${HistoryFolder}/region=${AWS::Region}/*'
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                  - s3:GetBucketLocation
+                Resource: !Sub 'arn:aws:s3:::${AuditBucket}'
+              - Effect: Allow
+                Action:
+                  - athena:ListWorkGroups
+                  - athena:GetWorkGroup
+                  - athena:ListQueryExecutions
+                  - athena:BatchGetQueryExecution
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    'aws:RequestedRegion': !Ref 'AWS::Region'
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub 'arn:aws:s3:::${CodeBucket}/versions/*'
+              - !If
+                - HasKmsKey
+                - Effect: Allow
+                  Action:
+                    - kms:Decrypt
+                    - kms:Encrypt
+                    - kms:GenerateDataKey
+                    - kms:ReEncryptFrom
+                    - kms:ReEncryptTo
+                    - kms:DescribeKey
+                  Resource: !Ref KmsKeyArn
+                - !Ref 'AWS::NoValue'
+              - !If
+                - HasIdcSecret
+                - Effect: Allow
+                  Action:
+                    - secretsmanager:GetSecretValue
+                  Resource: !Ref IdcSecretArn
+                - !Ref 'AWS::NoValue'
+              - !If
+                - HasIdcSecret
+                - Effect: Allow
+                  Action:
+                    - sts:AssumeRole
+                  Resource:
+                    - !Sub 'arn:aws:iam::${AWS::AccountId}:role/idp-stack-*'
+                - !Ref 'AWS::NoValue'
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}-AthenaHistoryLambdaFunction:*'
+
+
+  AthenaHistoryLambdaFunction:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-AthenaHistoryLambdaFunction'
+      Handler: 'athena_history.lambda_handler'
+      Role: !GetAtt AthenaHistoryLambdaRole.Arn
+      Code:
+        S3Bucket: !Ref CodeBucket
+        S3Key: !Sub 'versions/${Version}/athena_audit.zip'
+      Runtime: 'python3.13'
+      Architectures:
+        - arm64
+      Timeout: 300
+      Environment:
+        Variables:
+          AUDIT_BUCKET: !Ref AuditBucket
+          HISTORY_FOLDER: !Ref HistoryFolder
+          WORKGROUPS_FILTER: !Ref WorkgroupsFilter
+          IDC_SECRET_ARN: !If [HasIdcSecret, !Ref IdcSecretArn, !Ref 'AWS::NoValue']
+
+  DailyTriggerRule:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      ScheduleExpression: 'cron(15 0 * * ? *)'
+      Targets:
+        - Arn: !GetAtt AthenaHistoryLambdaFunction.Arn
+          Id: 'AthenaHistoryLambdaFunctionTarget'
+
+  PermissionForEventsToInvokeLambda:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      FunctionName: !Ref AthenaHistoryLambdaFunction
+      Action: 'lambda:InvokeFunction'
+      Principal: 'events.amazonaws.com'
+      SourceArn: !GetAtt DailyTriggerRule.Arn

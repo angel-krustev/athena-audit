@@ -1,0 +1,40 @@
+name: Run Tests
+on: [push, workflow_dispatch]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read  # To read the repository contents (for `actions/checkout`)
+      actions: read  # Allow the use of actions like `actions/cache`
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Get and cache requirements
+        uses: ./.github/actions/cached-requirements
+
+      - name: Run unit tests
+        run: |
+          source .venv/bin/activate
+          PYTHONPATH=src python -m pytest --color=yes test/*_unit.py
+
+      - name: Run mock AWS tests
+        run: |
+          source .venv/bin/activate
+          PYTHONPATH=src python -m pytest --color=yes test/*_mock_aws.py
+
+      - name: Get AWS Permissions
+        if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+        uses: aws-actions/configure-aws-credentials@v3
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/athena-audit-github-role
+          aws-region: us-east-1
+
+      - name: Run integration tests
+        if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+        run: |
+          source .venv/bin/activate
+          PYTHONPATH=src python -m pytest --color=yes test/*_integration.py

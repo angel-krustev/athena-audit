@@ -1,0 +1,20 @@
+{
+  "Region": "us-east-1",
+  "HistoryStackName": "athena-audit-history-prod",
+  "EventsStackName": "athena-audit-events-prod",
+  "CodeBucket": "REPLACE_ME",
+  "Version": "latest",
+  "AuditBucket": "REPLACE_ME",
+  "CloudTrailBucket": "REPLACE_ME",
+  "CloudTrailFolder": "athena-cloudtrail",
+  "DatabaseName": "athena_events",
+  "EventsFolder": "athena_audit/events",
+  "HistoryFolder": "athena_audit/history",
+  "REGIONS": "us-east-1",
+  "Workgroup": "primary",
+  "AthenaOutputFolder": "athena_audit/query_results",
+  "AthenaOutputBucket": "",
+  "KmsKeyArn": "REPLACE_ME",
+  "WorkgroupsFilter": "",
+  "IdcSecretArn": ""
+}

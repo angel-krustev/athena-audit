@@ -1,0 +1,105 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Identity Enhanced Role for Athena Audit - TIP access to IDC workgroup query history'
+
+Parameters:
+  OIDCRoleArn:
+    Type: String
+    Description: ARN of the OIDC Role that will assume this identity enhanced role
+    AllowedPattern: '^arn:aws:iam::[0-9]{12}:role/.+$'
+    ConstraintDescription: Must be a valid IAM role ARN
+
+  IdEnhancedRoleName:
+    Type: String
+    Description: Name for the Identity Enhanced IAM role
+    Default: 'AthenaAudit-IdEnhancedRole'
+    AllowedPattern: '^[a-zA-Z0-9+=,.@_-]+$'
+    ConstraintDescription: Must be a valid IAM role name
+
+  IdEnhancedSessionDuration:
+    Type: Number
+    Description: Maximum session duration in seconds (3600-43200)
+    Default: 43200
+    MinValue: 3600
+    MaxValue: 43200
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Trust Configuration
+        Parameters:
+          - OIDCRoleArn
+      - Label:
+          default: Role Configuration
+        Parameters:
+          - IdEnhancedRoleName
+          - IdEnhancedSessionDuration
+Resources:
+  IdEnhancedRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref IdEnhancedRoleName
+      Description: Identity-enhanced role for Athena Audit - reads query history from IDC workgroups via TIP
+      MaxSessionDuration: !Ref IdEnhancedSessionDuration
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowOIDCRoleAssumeWithContext
+            Effect: Allow
+            Principal:
+              AWS: !Ref OIDCRoleArn
+            Action:
+              - 'sts:AssumeRole'
+              - 'sts:SetContext'
+          - Sid: AllowSetSourceIdentity
+            Effect: Allow
+            Principal:
+              AWS: !Ref OIDCRoleArn
+            Action:
+              - 'sts:AssumeRole'
+              - 'sts:SetSourceIdentity'
+
+      ManagedPolicyArns:
+        - !Ref AthenaAuditPolicy
+
+      Tags:
+        - Key: Name
+          Value: !Ref IdEnhancedRoleName
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Purpose
+          Value: AthenaAuditTIP
+
+  AthenaAuditPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub '${IdEnhancedRoleName}-AthenaAudit'
+      Description: Read-only Athena permissions for auditing IDC workgroup query history
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AthenaQueryHistory
+            Effect: Allow
+            Action:
+              - 'athena:ListQueryExecutions'
+              - 'athena:BatchGetQueryExecution'
+              - 'athena:GetQueryExecution'
+              - 'athena:GetWorkGroup'
+              - 'athena:ListWorkGroups'
+            Resource: '*'
+
+Outputs:
+  IdEnhancedRoleArn:
+    Description: ARN of the Identity Enhanced IAM role
+    Value: !GetAtt IdEnhancedRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-IdEnhancedRoleArn'
+
+  IdEnhancedRoleName:
+    Description: Name of the Identity Enhanced IAM role
+    Value: !Ref IdEnhancedRole
+
+  ConfigurationValue:
+    Description: IdEnhanced Role ARN for cihi-auth configuration
+    Value: !Sub |
+      id_enhanced_role_arn: ${IdEnhancedRole.Arn}

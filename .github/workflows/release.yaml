@@ -1,0 +1,74 @@
+name: Package and Release Sources
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Package version'
+        required: true
+
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+      actions: read
+      id-token: write
+
+
+    env:
+      VERSION: ${{ github.event.inputs.version || github.ref_name }}
+
+    steps:
+    - name: Validate version input
+      if: github.event_name == 'workflow_dispatch'
+      run: |
+        if [[ ! "${{ github.event.inputs.version }}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          echo "Invalid version format. It should be v*.*.*"
+          exit 1
+        fi
+
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Zip source files
+      run: |
+        cd src
+        zip -r ../athena_audit.zip .
+
+    - name: Create GitHub Release
+      id: create_release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ env.VERSION }}
+        release_name: Release ${{ env.VERSION }}
+        draft: false
+        prerelease: false
+
+    - name: Upload Release Asset
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: ./athena_audit.zip
+        asset_name: athena_audit.zip
+        asset_content_type: application/zip
+
+    - name: Get AWS Permissions
+      uses: aws-actions/configure-aws-credentials@v3
+      with:
+        role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/athena-audit-github-publish-role
+        aws-region: us-east-1
+
+    - name: Copy zip to S3
+      run: |
+        aws s3 cp athena_audit.zip s3://athena-audit-publish/versions/${{ env.VERSION }}/athena_audit.zip
+        aws s3 cp athena_audit.zip s3://athena-audit-publish/versions/latest/athena_audit.zip

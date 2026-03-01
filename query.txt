@@ -1,0 +1,1 @@
+select source_identity, data_scanned, CONCAT('$', CAST(cost AS VARCHAR)) AS cost, query from events where source_identity <> ''
