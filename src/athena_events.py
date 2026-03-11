@@ -243,6 +243,26 @@ def lambda_handler(event, context):
     if "day" in event:
         from_day = event["day"]
         to_day = event["day"]
+    elif "days_back" in event:
+        from_day = get_day_back(int(event["days_back"]))
+        to_day = get_yesterday()
+    elif event.get("resume", False):
+        try:
+            rows = list(get_query_results(
+                f"SELECT MAX(day) AS latest_day FROM {TableType.EVENTS.table_name}"
+            ))
+            latest = rows[0]["latest_day"] if rows and rows[0]["latest_day"] else None
+        except Exception as e:
+            logger.warning(f"Could not query latest day from events table: {e}")
+            latest = None
+        if latest:
+            # Re-process latest day (overlap) in case it was partial
+            from_day = latest
+            logger.info(f"Resuming from latest day in events table: {latest}")
+        else:
+            from_day = get_yesterday()
+            logger.info("No existing events found, starting from yesterday")
+        to_day = get_yesterday()
     else:
         from_day = event.get("from_day", get_yesterday())
         to_day = event.get("to_day", get_yesterday())

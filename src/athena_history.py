@@ -11,10 +11,12 @@ from typing import List, Generator, Dict
 import boto3
 
 from common_utils import (
+    get_day_back,
     get_days,
     clear_folder,
     obj_exists,
     get_yesterday,
+    get_latest_day_in_s3,
 )
 
 logger = logging.getLogger()
@@ -308,6 +310,19 @@ def lambda_handler(event, context):
     if "day" in event:
         from_day = event["day"]
         to_day = event["day"]
+    elif "days_back" in event:
+        from_day = get_day_back(int(event["days_back"]))
+        to_day = get_yesterday()
+    elif event.get("resume", False):
+        latest = get_latest_day_in_s3(get_bucket(), get_location() + "/")
+        if latest:
+            # Re-process latest day (overlap) in case it was partial
+            from_day = latest
+            logger.info(f"Resuming from latest day in S3: {latest}")
+        else:
+            from_day = get_yesterday()
+            logger.info("No existing data found in S3, starting from yesterday")
+        to_day = get_yesterday()
     else:
         from_day = event.get("from_day", get_yesterday())
         to_day = event.get("to_day", get_yesterday())

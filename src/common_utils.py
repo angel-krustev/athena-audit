@@ -1,6 +1,7 @@
 import logging
+import re
 from datetime import datetime, timedelta, date
-from typing import Generator
+from typing import Generator, Optional
 
 import boto3
 from botocore.exceptions import ClientError
@@ -14,6 +15,34 @@ def get_day_back(back: int) -> str:
 
 def get_yesterday() -> str:
     return get_day_back(1)
+
+
+def get_latest_day_in_s3(bucket: str, prefix: str) -> Optional[str]:
+    """Scan S3 prefix for the latest day= partition and return it (YYYY-MM-DD), or None."""
+    s3_client = boto3.client("s3")
+    day_pattern = re.compile(r"day=(\d{4}-\d{2}-\d{2})")
+    latest = None
+    paginator = s3_client.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix, Delimiter="/"):
+        for cp in page.get("CommonPrefixes", []):
+            match = day_pattern.search(cp["Prefix"])
+            if match:
+                day_val = match.group(1)
+                if latest is None or day_val > latest:
+                    latest = day_val
+    if latest is not None:
+        return latest
+    # No top-level day= found — look one level deeper (e.g. region=.../day=...)
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix, Delimiter="/"):
+        for cp in page.get("CommonPrefixes", []):
+            for inner_page in paginator.paginate(Bucket=bucket, Prefix=cp["Prefix"], Delimiter="/"):
+                for inner_cp in inner_page.get("CommonPrefixes", []):
+                    match = day_pattern.search(inner_cp["Prefix"])
+                    if match:
+                        day_val = match.group(1)
+                        if latest is None or day_val > latest:
+                            latest = day_val
+    return latest
 
 
 def get_days(from_day: str, to_day: str) -> Generator[str, None, None]:

@@ -136,10 +136,11 @@ Resources:
   DailyTriggerRule:
     Type: 'AWS::Events::Rule'
     Properties:
-      ScheduleExpression: 'cron(15 0 * * ? *)'
+      ScheduleExpression: 'rate(2 hours)'
       Targets:
         - Arn: !GetAtt AthenaHistoryLambdaFunction.Arn
           Id: 'AthenaHistoryLambdaFunctionTarget'
+          Input: '{"resume": true}'
 
   PermissionForEventsToInvokeLambda:
     Type: 'AWS::Lambda::Permission'

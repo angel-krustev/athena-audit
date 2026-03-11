@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+set -x
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -33,7 +34,7 @@ if [[ -n "${WHL}" ]]; then
 fi
 
 # Create zip
-cd "${BUILD_DIR}"
+cd "${BUILD_DIR}/*"
 7z a -tzip "${OUTPUT_FILE}" .
 
 # If using zip instead of 7z, uncomment the line below and comment out the 7z line above:

@@ -234,12 +234,43 @@ SELECT * FROM athena_events.events ORDER BY event_time DESC LIMIT 20;
 
 ## Daily Operations
 
-Once deployed, both Lambdas run automatically on a daily schedule:
+Once deployed, both Lambdas run automatically every 2 hours in **resume mode**:
 
-| Lambda | Schedule (UTC) | Purpose |
-|---|---|---|
-| History | `00:15` | Collects previous day's query executions |
-| Events | `01:15` | JOINs CloudTrail + History, writes enriched events |
+| Lambda | Schedule | Mode | Purpose |
+|---|---|---|---|
+| History | Every 2 hours | `resume` | Finds the latest day already in S3, re-processes from there to yesterday |
+| Events | Every 2 hours | `resume` | Finds the latest day in the events table, re-processes from there to yesterday |
+
+### Resume Mode (No Missed Data)
+
+By default, the EventBridge rules pass `{"resume": true}` to both Lambdas. On each run, the Lambda:
+
+1. **History:** Scans S3 for the latest `day=` partition under the history prefix
+2. **Events:** Queries `SELECT MAX(day) FROM events` table
+3. Uses that day as `from_day` (re-processing it for overlap in case it was partial) and yesterday as `to_day`
+4. If no existing data is found (first run), defaults to yesterday
+
+This means:
+- **No gaps:** If a run fails or times out, the next run automatically picks up from where data was last written
+- **Small batches:** Each 2-hour run only processes 0–1 days of new data, so it stays well within the 5-minute Lambda timeout
+- **Idempotent:** Re-processing a day replaces existing data, so there are no duplicates
+- **Self-healing:** Late-arriving data or partial failures are caught by the next run
+
+### Alternative: Fixed Window (`days_back`)
+
+You can also use a fixed rolling window instead of resume mode:
+```bash
+aws lambda invoke \
+  --function-name <history-stack-name>-AthenaHistoryLambdaFunction \
+  --payload '{"days_back": 4}' \
+  --region us-east-1 \
+  /dev/stdout
+```
+
+To switch the scheduled trigger to fixed window, update the `Input` field in the CloudFormation template:
+```yaml
+Input: '{"days_back": 4}'
+```
 
 No manual intervention is needed unless:
 - IDC tokens expire (re-run `cihi-auth authenticate` + `create_idc_secret.sh`)
