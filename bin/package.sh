@@ -29,12 +29,12 @@ if [[ -n "${WHL}" ]]; then
   echo "Installing cihi_auth + dependencies from: $(basename "${WHL}")"
   pip install "${WHL}" -t "${BUILD_DIR}" --quiet \
     --no-deps
-  pip install "click>=8.1.7,<8.2" "PyJWT>=2.8.0,<3" "chardet>=5.2.0,<6" "requests>=2.31.0,<3" \
+  pip install "urllib3>=2.6.3, <3.0.0" "click>=8.1.7,<8.2" "PyJWT>=2.8.0,<3" "chardet>=5.2.0,<6" "requests>=2.31.0,<3" \
     -t "${BUILD_DIR}" --quiet --upgrade
 fi
 
 # Create zip
-cd "${BUILD_DIR}/*"
+cd "${BUILD_DIR}"
 7z a -tzip "${OUTPUT_FILE}" .
 
 # If using zip instead of 7z, uncomment the line below and comment out the 7z line above:

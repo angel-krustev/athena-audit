@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#set -euo pipefail
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -114,7 +114,8 @@ aws cloudformation deploy \
     AthenaOutputFolder="${ATHENA_OUTPUT_FOLDER}" \
     AthenaOutputBucket="${ATHENA_OUTPUT_BUCKET}" \
     CodeBucket="${CODE_BUCKET}" \
-    KmsKeyArn="${KMS_KEY_ARN}"
+    KmsKeyArn="${KMS_KEY_ARN}" \
+    WorkgroupsFilter="${WORKGROUPS_FILTER}"
 
 ###############################################################################
 # Force-update Lambda code (picks up new zip even when template is unchanged)
