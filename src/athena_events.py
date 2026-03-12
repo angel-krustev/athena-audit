@@ -132,6 +132,10 @@ def get_query_results(query: str) -> Generator[Dict, None, None]:
             yield row_dict
 
 
+def get_workgroups_filter() -> str:
+    return os.environ.get("WORKGROUPS_FILTER", "").strip().lower()
+
+
 def insert_data(full_day_str: str, region: str):
     year = full_day_str[:4]
     month = full_day_str[5:7]
@@ -142,11 +146,14 @@ PARTITION (region= '{region}', year= '{year}', month= '{month}', day= '{day}')
 LOCATION 's3://{TableType.CLOUD_TRAIL.bucket}/{TableType.CLOUD_TRAIL.folder}/{region}/{year}/{month}/{day}/'"""
     run_query(alter_sql)
 
+    wg_filter = get_workgroups_filter()
+    wg_filter_sql = f"\n      AND LOWER(json_extract_scalar(requestParameters, '$.workGroup')) LIKE '%{wg_filter}%'" if wg_filter else ""
+
     insert_sql = f"""
 INSERT INTO {TableType.EVENTS.table_name} (query_id, event_time, source_identity,
   on_behalf_of_user_id, user_identity_type, user_identity_principal,
   user_identity_arn, user_agent, source_ip, query, database,
-  status, data_scanned, cost, workgroup, region, day)
+  status, state_change_reason, data_scanned, cost, workgroup, region, day)
 SELECT 
   json_extract_scalar(responseelements, '$.queryExecutionId') AS query_id,
   CAST(From_iso8601_timestamp(eventtime) AS TIMESTAMP) AS event_time,
@@ -160,6 +167,7 @@ SELECT
   COALESCE(h.query, NULLIF(json_extract_scalar(requestParameters, '$.queryString'), '***OMITTED***')) AS query, 
   json_extract_scalar(requestParameters, '$.queryExecutionContext.database') AS database,
   h.status AS status,
+  h.state_change_reason AS state_change_reason,
   COALESCE(h.data_scanned, 0) AS data_scanned,
   CAST(COALESCE(h.data_scanned, 0) / 1099511627776.0 * {get_cost_per_tb()} AS DECIMAL(12,8)) AS cost,
   json_extract_scalar(requestParameters, '$.workGroup') AS workgroup,
@@ -176,13 +184,62 @@ WHERE eventsource = 'athena.amazonaws.com'
       AND ct.region = '{region}'
       AND year = '{year}'
       AND month = '{month}'
-      AND ct.day = '{day}'
+      AND ct.day = '{day}'{wg_filter_sql}
+      AND COALESCE(h.query, NULLIF(json_extract_scalar(requestParameters, '$.queryString'), '***OMITTED***')) IS NOT NULL
 """
     result = run_query(insert_sql)
     if "error" in result:
-        logger.warning(f"INSERT failed for {full_day_str}, region: {region}: {result['error']}")
+        logger.warning(f"INSERT (CloudTrail) failed for {full_day_str}, region: {region}: {result['error']}")
     else:
-        logger.info(f"Inserted data for {full_day_str}, region: {region}. Result: {result}")
+        logger.info(f"Inserted CloudTrail data for {full_day_str}, region: {region}. Result: {result}")
+
+    # Second pass: insert history-only records not found in CloudTrail
+    # (IDC/TIP queries often don't generate StartQueryExecution CloudTrail events)
+    wg_history_filter_sql = f"\n      AND LOWER(h.workgroup) LIKE '%{wg_filter}%'" if wg_filter else ""
+    history_only_sql = f"""
+INSERT INTO {TableType.EVENTS.table_name} (query_id, event_time, source_identity,
+  on_behalf_of_user_id, user_identity_type, user_identity_principal,
+  user_identity_arn, user_agent, source_ip, query, database,
+  status, state_change_reason, data_scanned, cost, workgroup, region, day)
+SELECT
+  h.query_id,
+  CAST(from_iso8601_timestamp(h.submission_time) AS TIMESTAMP) AS event_time,
+  CAST(NULL AS VARCHAR) AS source_identity,
+  CAST(NULL AS VARCHAR) AS on_behalf_of_user_id,
+  CAST(NULL AS VARCHAR) AS user_identity_type,
+  CAST(NULL AS VARCHAR) AS user_identity_principal,
+  CAST(NULL AS VARCHAR) AS user_identity_arn,
+  CAST(NULL AS VARCHAR) AS user_agent,
+  CAST(NULL AS VARCHAR) AS source_ip,
+  h.query,
+  CAST(NULL AS VARCHAR) AS database,
+  h.status,
+  h.state_change_reason,
+  COALESCE(h.data_scanned, 0) AS data_scanned,
+  CAST(COALESCE(h.data_scanned, 0) / 1099511627776.0 * {get_cost_per_tb()} AS DECIMAL(12,8)) AS cost,
+  h.workgroup,
+  h.region,
+  '{full_day_str}' AS day
+FROM {TableType.HISTORY.table_name} AS h
+WHERE h.day = '{full_day_str}'
+      AND h.region = '{region}'
+      AND h.query IS NOT NULL{wg_history_filter_sql}
+      AND h.query_id NOT IN (
+        SELECT json_extract_scalar(responseelements, '$.queryExecutionId')
+        FROM {TableType.CLOUD_TRAIL.table_name}
+        WHERE eventsource = 'athena.amazonaws.com'
+              AND eventname IN ('StartQueryExecution')
+              AND region = '{region}'
+              AND year = '{year}'
+              AND month = '{month}'
+              AND day = '{day}'
+      )
+"""
+    result2 = run_query(history_only_sql)
+    if "error" in result2:
+        logger.warning(f"INSERT (history-only) failed for {full_day_str}, region: {region}: {result2['error']}")
+    else:
+        logger.info(f"Inserted history-only data for {full_day_str}, region: {region}. Result: {result2}")
 
 
 def repair_events_table(days_back: int):
@@ -238,15 +295,25 @@ def init_database(repair_days_back: int, force: bool = False):
     return False
 
 
+INIT_DAYS_BACK = 14
+
+
 def lambda_handler(event, context):
-    init_database(event.get("repair_days_back", 90), force=event.get("force_recreate", False))
+    force = event.get("force_recreate", False)
+    init_database(INIT_DAYS_BACK, force=force)
     if "day" in event:
         from_day = event["day"]
         to_day = event["day"]
-    elif "days_back" in event:
-        from_day = get_day_back(int(event["days_back"]))
+    elif "from_day" in event:
+        from_day = event["from_day"]
+        to_day = event.get("to_day", get_yesterday())
+    elif force:
+        # On table recreation, backfill the last INIT_DAYS_BACK days
+        from_day = get_day_back(INIT_DAYS_BACK)
         to_day = get_yesterday()
-    elif event.get("resume", False):
+        logger.info(f"Force recreate: backfilling {INIT_DAYS_BACK} days")
+    else:
+        # Default: resume from latest data in events table
         try:
             rows = list(get_query_results(
                 f"SELECT MAX(day) AS latest_day FROM {TableType.EVENTS.table_name}"
@@ -256,16 +323,12 @@ def lambda_handler(event, context):
             logger.warning(f"Could not query latest day from events table: {e}")
             latest = None
         if latest:
-            # Re-process latest day (overlap) in case it was partial
             from_day = latest
             logger.info(f"Resuming from latest day in events table: {latest}")
         else:
-            from_day = get_yesterday()
-            logger.info("No existing events found, starting from yesterday")
+            from_day = get_day_back(INIT_DAYS_BACK)
+            logger.info(f"No existing events found, backfilling {INIT_DAYS_BACK} days")
         to_day = get_yesterday()
-    else:
-        from_day = event.get("from_day", get_yesterday())
-        to_day = event.get("to_day", get_yesterday())
 
     result = {}
     logger.info(f"START. from day: {from_day}, to day: {to_day}")

@@ -191,33 +191,33 @@ Repeat the process for each IAM user, role, or SSO role that needs to query the 
 
 ### 5a. Run the History Lambda
 
-Invoke the History Lambda to collect query execution data:
+Invoke the History Lambda with no payload — it will automatically backfill the last 14 days on first run:
 
 ```bash
 aws lambda invoke \
   --function-name <history-stack-name>-AthenaHistoryLambdaFunction \
-  --payload '{"day": "2026-03-01"}' \
+  --payload '{}' \
   --region us-east-1 \
   /dev/stdout
 ```
 
-Or for a date range:
+Or for a specific date range:
 ```bash
 aws lambda invoke \
   --function-name <history-stack-name>-AthenaHistoryLambdaFunction \
-  --payload '{"from_day": "2026-02-28", "to_day": "2026-03-01"}' \
+  --payload '{"from_day": "2026-02-15", "to_day": "2026-03-01"}' \
   --region us-east-1 \
   /dev/stdout
 ```
 
 ### 5b. Run the Events Lambda
 
-Invoke the Events Lambda with `force_recreate` to create the database and tables:
+Invoke the Events Lambda with `force_recreate` to create the database and tables (also backfills 14 days):
 
 ```bash
 aws lambda invoke \
   --function-name <events-stack-name>-AthenaEventsLambdaFunction \
-  --payload '{"force_recreate": true, "day": "2026-03-01"}' \
+  --payload '{"force_recreate": true}' \
   --region us-east-1 \
   /dev/stdout
 ```
@@ -234,42 +234,43 @@ SELECT * FROM athena_events.events ORDER BY event_time DESC LIMIT 20;
 
 ## Daily Operations
 
-Once deployed, both Lambdas run automatically every 2 hours in **resume mode**:
+Once deployed, both Lambdas run automatically every 2 hours via EventBridge:
 
-| Lambda | Schedule | Mode | Purpose |
-|---|---|---|---|
-| History | Every 2 hours | `resume` | Finds the latest day already in S3, re-processes from there to yesterday |
-| Events | Every 2 hours | `resume` | Finds the latest day in the events table, re-processes from there to yesterday |
+| Lambda | Schedule | Behavior |
+|---|---|---|
+| History | Every 2 hours | Finds the latest day in S3, re-processes from there to yesterday |
+| Events | Every 2 hours | Finds the latest day in the events table, re-processes from there to yesterday |
 
-### Resume Mode (No Missed Data)
+### How It Works
 
-By default, the EventBridge rules pass `{"resume": true}` to both Lambdas. On each run, the Lambda:
+Each scheduled invocation receives an empty event (`{}`). With no parameters, the Lambda automatically:
 
-1. **History:** Scans S3 for the latest `day=` partition under the history prefix
-2. **Events:** Queries `SELECT MAX(day) FROM events` table
-3. Uses that day as `from_day` (re-processing it for overlap in case it was partial) and yesterday as `to_day`
-4. If no existing data is found (first run), defaults to yesterday
+1. **History:** Scans S3 for the latest `day=` partition → uses it as `from_day`
+2. **Events:** Queries `SELECT MAX(day) FROM events` → uses it as `from_day`
+3. Re-processes from that day to yesterday (overlap catches partial data)
+4. On **first run** (no existing data), backfills the last **14 days**
 
-This means:
-- **No gaps:** If a run fails or times out, the next run automatically picks up from where data was last written
-- **Small batches:** Each 2-hour run only processes 0–1 days of new data, so it stays well within the 5-minute Lambda timeout
-- **Idempotent:** Re-processing a day replaces existing data, so there are no duplicates
+Key properties:
+- **No gaps:** If a run fails, the next one picks up from the last successfully written data
+- **Idempotent:** Re-processing a day replaces existing data — no duplicates
 - **Self-healing:** Late-arriving data or partial failures are caught by the next run
 
-### Alternative: Fixed Window (`days_back`)
+### Manual Backfill
 
-You can also use a fixed rolling window instead of resume mode:
+To manually process specific dates, invoke the Lambda with `day` or `from_day`/`to_day`:
+
 ```bash
+# Single day
 aws lambda invoke \
-  --function-name <history-stack-name>-AthenaHistoryLambdaFunction \
-  --payload '{"days_back": 4}' \
-  --region us-east-1 \
-  /dev/stdout
-```
+  --function-name <stack-name>-AthenaHistoryLambdaFunction \
+  --payload '{"day": "2026-03-01"}' \
+  --region us-east-1 /dev/stdout
 
-To switch the scheduled trigger to fixed window, update the `Input` field in the CloudFormation template:
-```yaml
-Input: '{"days_back": 4}'
+# Date range
+aws lambda invoke \
+  --function-name <stack-name>-AthenaHistoryLambdaFunction \
+  --payload '{"from_day": "2026-02-15", "to_day": "2026-03-01"}' \
+  --region us-east-1 /dev/stdout
 ```
 
 No manual intervention is needed unless:

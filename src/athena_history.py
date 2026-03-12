@@ -152,9 +152,12 @@ def create_history_days_range(
     skipped = 0
     for w in workgroups:
         key = get_history_key(from_day, w)
+        # Only skip if data exists AND from_day is older than yesterday
+        # (recent days may be incomplete and need re-collection)
         data_exists = obj_exists(get_bucket(), key)
-        logger.info(f"Current workgroup: {w}. Data Exists: {data_exists}")
-        if data_exists:
+        is_recent = from_day >= get_day_back(2)
+        logger.info(f"Current workgroup: {w}. Data Exists: {data_exists}. Recent: {is_recent}")
+        if data_exists and not is_recent:
             exists += 1
         else:
             try:
@@ -282,6 +285,8 @@ def create_history_day_for_workgroup(from_day: str, to_day: str, workgroup: str,
                 "query": query["Query"],
                 "data_scanned": data_scanned,
                 "status": query["Status"]["State"],
+                "state_change_reason": query["Status"].get("StateChangeReason", ""),
+                "submission_time": query["Status"].get("SubmissionDateTime", "").isoformat() if isinstance(query["Status"].get("SubmissionDateTime"), datetime) else "",
                 "workgroup": workgroup,
             }
             json_file.write(json.dumps(record))
@@ -310,22 +315,19 @@ def lambda_handler(event, context):
     if "day" in event:
         from_day = event["day"]
         to_day = event["day"]
-    elif "days_back" in event:
-        from_day = get_day_back(int(event["days_back"]))
-        to_day = get_yesterday()
-    elif event.get("resume", False):
+    elif "from_day" in event:
+        from_day = event["from_day"]
+        to_day = event.get("to_day", get_yesterday())
+    else:
+        # Default: resume from latest data in S3
         latest = get_latest_day_in_s3(get_bucket(), get_location() + "/")
         if latest:
-            # Re-process latest day (overlap) in case it was partial
             from_day = latest
             logger.info(f"Resuming from latest day in S3: {latest}")
         else:
-            from_day = get_yesterday()
-            logger.info("No existing data found in S3, starting from yesterday")
+            from_day = get_day_back(14)
+            logger.info(f"No existing data found in S3, backfilling from {from_day}")
         to_day = get_yesterday()
-    else:
-        from_day = event.get("from_day", get_yesterday())
-        to_day = event.get("to_day", get_yesterday())
 
     validate_day_range(from_day, to_day)
 

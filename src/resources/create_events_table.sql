@@ -12,6 +12,7 @@ CREATE EXTERNAL TABLE {table} (
   query string,
   `database` string,
   status string,
+  state_change_reason string,
   data_scanned bigint,
   cost decimal(12,8))
 PARTITIONED BY (

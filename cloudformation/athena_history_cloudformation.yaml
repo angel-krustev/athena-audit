@@ -140,7 +140,7 @@ Resources:
       Targets:
         - Arn: !GetAtt AthenaHistoryLambdaFunction.Arn
           Id: 'AthenaHistoryLambdaFunctionTarget'
-          Input: '{"resume": true}'
+          Input: '{}'
 
   PermissionForEventsToInvokeLambda:
     Type: 'AWS::Lambda::Permission'

@@ -52,6 +52,10 @@ Parameters:
     Type: String
     Description: Cost in USD per TB of data scanned by Athena (used for cost estimation)
     Default: '5.00'
+  WorkgroupsFilter:
+    Type: String
+    Description: Only include events from workgroups whose name contains this string (case-insensitive). Leave empty for all workgroups.
+    Default: ''
 
 Conditions:
   HasKmsKey: !Not [!Equals [!Ref KmsKeyArn, '']]
@@ -211,6 +215,7 @@ Resources:
           HISTORY_FOLDER: !Ref HistoryFolder
           ATHENA_OUTPUT_FOLDER: !Ref AthenaOutputFolder
           COST_PER_TB: !Ref CostPerTB
+          WORKGROUPS_FILTER: !Ref WorkgroupsFilter
 
   DailyTriggerRule:
     Type: 'AWS::Events::Rule'
@@ -219,7 +224,7 @@ Resources:
       Targets:
         - Arn: !GetAtt AthenaEventsLambdaFunction.Arn
           Id: 'AthenaEventsLambdaFunctionTarget'
-          Input: '{"resume": true}'
+          Input: '{}'
 
   PermissionForEventsToInvokeLambda:
     Type: 'AWS::Lambda::Permission'

@@ -2,7 +2,9 @@ CREATE EXTERNAL TABLE {table}(
   query_id string,
   query string,
   data_scanned bigint,
-  status string)
+  status string,
+  state_change_reason string,
+  submission_time string)
 PARTITIONED BY (
   region string,
   day string,
