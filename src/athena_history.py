@@ -1,4 +1,3 @@
-import concurrent.futures
 import gzip
 import json
 import logging
@@ -186,50 +185,26 @@ def get_query_exec_day(query_exe: dict) -> date:
     return dt.date() if isinstance(dt, datetime) else None
 
 
-def get_query_executions_data(athena, ids: List[str]) -> dict:
-    return athena.batch_get_query_execution(QueryExecutionIds=ids)
-
-
 def get_query_executions_for_workgroup(
     workgroup: str, from_day: str, athena_client=None
 ) -> Generator[dict, None, None]:
     athena = athena_client or boto3.client("athena")
     from_date = datetime.strptime(from_day, "%Y-%m-%d").date()
-    max_workers = 3
-    paginator = iter(
-        athena.get_paginator("list_query_executions").paginate(WorkGroup=workgroup)
-    )
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as threat_pool:
-        while True:
-            futures = []
-            for _ in range(max_workers):
-                try:
-                    page = next(paginator)
-                except StopIteration:
-                    break
-                if len(page["QueryExecutionIds"]) > 0:
-                    futures.append(
-                        threat_pool.submit(
-                            get_query_executions_data, athena, page["QueryExecutionIds"]
-                        )
-                    )
-            if len(futures) == 0:
-                return
-            # Process all futures in this round before deciding to stop
-            found_older = False
-            for future in futures:
-                query_executions = future.result()
-                for query in query_executions["QueryExecutions"]:
-                    if query["Status"]["State"] in ["SUCCEEDED", "FAILED", "CANCELLED"]:
-                        query_day = get_query_exec_day(query)
-                        if query_day is None:
-                            continue
-                        if query_day >= from_date:
-                            yield query
-                        else:
-                            found_older = True
-            if found_older:
-                return
+    paginator = athena.get_paginator("list_query_executions").paginate(WorkGroup=workgroup)
+    for page in paginator:
+        ids = page.get("QueryExecutionIds", [])
+        if not ids:
+            continue
+        result = athena.batch_get_query_execution(QueryExecutionIds=ids)
+        for query in result["QueryExecutions"]:
+            if query["Status"]["State"] in ["SUCCEEDED", "FAILED", "CANCELLED"]:
+                query_day = get_query_exec_day(query)
+                if query_day is None:
+                    continue
+                if query_day >= from_date:
+                    yield query
+                else:
+                    return
 
 
 def upload_history_file(file_name: str, day: str, workgroup: str):
