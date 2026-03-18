@@ -5,7 +5,7 @@ import logging
 import os
 import shutil
 import tempfile
-from datetime import datetime
+from datetime import datetime, date, timedelta
 from typing import List, Generator, Dict
 
 import boto3
@@ -177,9 +177,11 @@ def create_history_day(
     }
 
 
-def get_query_exec_day(query_exe: dict) -> str:
-    query_date = query_exe["Status"]["CompletionDateTime"]
-    return query_date.strftime("%Y-%m-%d")
+def get_query_exec_day(query_exe: dict) -> date:
+    dt = query_exe["Status"].get("CompletionDateTime") or query_exe["Status"].get("SubmissionDateTime")
+    if dt is None:
+        return None
+    return dt.date() if isinstance(dt, datetime) else None
 
 
 def get_query_executions_data(athena, ids: List[str]) -> dict:
@@ -190,6 +192,7 @@ def get_query_executions_for_workgroup(
     workgroup: str, from_day: str, athena_client=None
 ) -> Generator[dict, None, None]:
     athena = athena_client or boto3.client("athena")
+    from_date = datetime.strptime(from_day, "%Y-%m-%d").date()
     max_workers = 3
     paginator = iter(
         athena.get_paginator("list_query_executions").paginate(WorkGroup=workgroup)
@@ -210,65 +213,82 @@ def get_query_executions_for_workgroup(
                     )
             if len(futures) == 0:
                 return
-            # Wait for all futures to complete, in the same order they were created
+            # Process all futures in this round before deciding to stop
+            found_older = False
             for future in futures:
                 query_executions = future.result()
                 for query in query_executions["QueryExecutions"]:
                     if query["Status"]["State"] in ["SUCCEEDED", "FAILED", "CANCELLED"]:
                         query_day = get_query_exec_day(query)
-                        if query_day >= from_day:
+                        if query_day is None:
+                            continue
+                        if query_day >= from_date:
                             yield query
                         else:
-                            return
+                            found_older = True
+            if found_older:
+                return
 
 
 def upload_history_file(file_name: str, day: str, workgroup: str):
-    with tempfile.NamedTemporaryFile(mode="wb", delete=False) as f_out:
-        with (
-            open(file_name, "rb") as json_file_in,
-            gzip.open(f_out.name, "wb") as gzip_fie,
-        ):
-            # noinspection PyTypeChecker
-            shutil.copyfileobj(json_file_in, gzip_fie)
+    gz_path = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="wb", delete=False, suffix=".gz") as f_out:
+            gz_path = f_out.name
+        with open(file_name, "rb") as json_file_in, gzip.open(gz_path, "wb") as gzip_file:
+            shutil.copyfileobj(json_file_in, gzip_file)
         key = get_history_key(day, workgroup)
         s3_client = boto3.client("s3")
-        s3_client.upload_file(f_out.name, get_bucket(), key)
-    logger.info(f"uploaded key: {key}")
+        s3_client.upload_file(gz_path, get_bucket(), key)
+        logger.info(f"uploaded key: {key}")
+    finally:
+        if gz_path and os.path.exists(gz_path):
+            os.remove(gz_path)
 
 
 def create_history_day_for_workgroup(day: str, workgroup: str, athena_client=None) -> int:
     rows = 0
     json_file = None
-
-    for query in get_query_executions_for_workgroup(workgroup, day, athena_client=athena_client):
-        query_day = get_query_exec_day(query)
-        if query_day != day:
-            continue
-        if json_file is None:
-            json_file = tempfile.NamedTemporaryFile(mode="w", delete=False)
-        if "Statistics" in query and "DataScannedInBytes" in query["Statistics"]:
-            data_scanned = query["Statistics"]["DataScannedInBytes"]
-        else:
-            data_scanned = 0
-        record = {
-            "query_id": query["QueryExecutionId"],
-            "query": query["Query"],
-            "data_scanned": data_scanned,
-            "status": query["Status"]["State"],
-            "state_change_reason": query["Status"].get("StateChangeReason", ""),
-            "submission_time": query["Status"].get("SubmissionDateTime", "").isoformat() if isinstance(query["Status"].get("SubmissionDateTime"), datetime) else "",
-            "workgroup": workgroup,
-        }
-        json_file.write(json.dumps(record))
-        json_file.write("\n")
-        rows += 1
-        if rows % 1000 == 0:
-            logger.info(f"Day: {day}, Written {rows} rows")
-    if json_file:
-        logger.info(f"Day: {day}, Total: {rows} rows")
-        json_file.close()
-        upload_history_file(json_file.name, day, workgroup)
-        os.remove(json_file.name)
+    target_date = datetime.strptime(day, "%Y-%m-%d").date()
+    try:
+        # Pass the day before target to the generator so it pages past all of
+        # yesterday's queries even if batch_get_query_execution returns them
+        # out of order across page boundaries.
+        day_before = str(target_date - timedelta(days=1))
+        for query in get_query_executions_for_workgroup(workgroup, day_before, athena_client=athena_client):
+            query_day = get_query_exec_day(query)
+            if query_day is None or query_day != target_date:
+                continue
+            if json_file is None:
+                json_file = tempfile.NamedTemporaryFile(mode="w", delete=False)
+            if "Statistics" in query and "DataScannedInBytes" in query["Statistics"]:
+                data_scanned = query["Statistics"]["DataScannedInBytes"]
+            else:
+                data_scanned = 0
+            record = {
+                "query_id": query["QueryExecutionId"],
+                "query": query["Query"],
+                "data_scanned": data_scanned,
+                "status": query["Status"]["State"],
+                "state_change_reason": query["Status"].get("StateChangeReason", ""),
+                "submission_time": query["Status"].get("SubmissionDateTime", "").isoformat() if isinstance(query["Status"].get("SubmissionDateTime"), datetime) else "",
+                "workgroup": workgroup,
+            }
+            json_file.write(json.dumps(record))
+            json_file.write("\n")
+            rows += 1
+            if rows % 1000 == 0:
+                logger.info(f"Day: {day}, Written {rows} rows")
+        if json_file:
+            logger.info(f"Day: {day}, Total: {rows} rows")
+            json_file.close()
+            upload_history_file(json_file.name, day, workgroup)
+    finally:
+        if json_file:
+            if not json_file.closed:
+                json_file.close()
+            if os.path.exists(json_file.name):
+                os.remove(json_file.name)
     return rows
 
 
