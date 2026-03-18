@@ -178,7 +178,9 @@ def create_history_day(
 
 
 def get_query_exec_day(query_exe: dict) -> date:
-    dt = query_exe["Status"].get("CompletionDateTime") or query_exe["Status"].get("SubmissionDateTime")
+    dt = query_exe["Status"].get("SubmissionDateTime")
+    if dt is None:
+        dt = query_exe["Status"].get("CompletionDateTime")
     if dt is None:
         return None
     return dt.date() if isinstance(dt, datetime) else None
