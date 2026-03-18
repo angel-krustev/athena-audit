@@ -301,34 +301,15 @@ INIT_DAYS_BACK = 14
 def lambda_handler(event, context):
     force = event.get("force_recreate", False)
     init_database(INIT_DAYS_BACK, force=force)
-    if "day" in event:
-        from_day = event["day"]
-        to_day = event["day"]
-    elif "from_day" in event:
-        from_day = event["from_day"]
-        to_day = event.get("to_day", get_yesterday())
-    elif force:
+    if force:
         # On table recreation, backfill the last INIT_DAYS_BACK days
         from_day = get_day_back(INIT_DAYS_BACK)
         to_day = get_yesterday()
         logger.info(f"Force recreate: backfilling {INIT_DAYS_BACK} days")
     else:
-        # Default: resume from latest data in events table
-        try:
-            rows = list(get_query_results(
-                f"SELECT MAX(day) AS latest_day FROM {TableType.EVENTS.table_name}"
-            ))
-            latest = rows[0]["latest_day"] if rows and rows[0]["latest_day"] else None
-        except Exception as e:
-            logger.warning(f"Could not query latest day from events table: {e}")
-            latest = None
-        if latest:
-            from_day = latest
-            logger.info(f"Resuming from latest day in events table: {latest}")
-        else:
-            from_day = get_day_back(INIT_DAYS_BACK)
-            logger.info(f"No existing events found, backfilling {INIT_DAYS_BACK} days")
-        to_day = get_yesterday()
+        day = event.get("day", get_yesterday())
+        from_day = day
+        to_day = day
 
     result = {}
     logger.info(f"START. from day: {from_day}, to day: {to_day}")

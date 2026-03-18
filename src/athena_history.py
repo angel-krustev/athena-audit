@@ -5,18 +5,14 @@ import logging
 import os
 import shutil
 import tempfile
-from datetime import date, datetime
+from datetime import datetime
 from typing import List, Generator, Dict
 
 import boto3
 
 from common_utils import (
-    get_day_back,
-    get_days,
     clear_folder,
-    obj_exists,
     get_yesterday,
-    get_latest_day_in_s3,
 )
 
 logger = logging.getLogger()
@@ -121,16 +117,15 @@ def get_history_key(day: str, workgroup: str) -> str:
     return f"{get_daily_location_workgroup(day, workgroup)}/data.json.gz"
 
 
-def create_history_days_range(
-    from_day: str, to_day: str, workgroup: str = None, clear: bool = False
+def create_history_day(
+    day: str, workgroup: str = None, clear: bool = False
 ) -> Dict[str, any]:
     if clear:
-        for day in get_days(from_day, to_day):
-            if workgroup:
-                path = get_daily_location_workgroup(day, workgroup)
-            else:
-                path = get_daily_location(day)
-            clear_folder(get_bucket(), path)
+        if workgroup:
+            path = get_daily_location_workgroup(day, workgroup)
+        else:
+            path = get_daily_location(day)
+        clear_folder(get_bucket(), path)
     if workgroup is None:
         client = boto3.client("athena")
         workgroups: List[str] = [
@@ -147,50 +142,36 @@ def create_history_days_range(
     idc_client = get_idc_athena_client()
     logger.info(f"TIP client available: {idc_client is not None}")
 
-    exists = 0
     total_records = 0
     skipped = 0
     for w in workgroups:
-        key = get_history_key(from_day, w)
-        # Only skip if data exists AND from_day is older than yesterday
-        # (recent days may be incomplete and need re-collection)
-        data_exists = obj_exists(get_bucket(), key)
-        is_recent = from_day >= get_day_back(2)
-        logger.info(f"Current workgroup: {w}. Data Exists: {data_exists}. Recent: {is_recent}")
-        if data_exists and not is_recent:
-            exists += 1
-        else:
+        try:
+            records = create_history_day_for_workgroup(
+                day, workgroup=w, athena_client=None
+            )
+            logger.info(f"Queries for workgroup {w} written: {records}")
+            total_records += records
+        except Exception as iam_err:
+            if idc_client is None:
+                logger.warning(f"Skipping workgroup {w}: {iam_err}")
+                skipped += 1
+                continue
+            # IAM access failed — retry with TIP client
+            logger.info(f"IAM access failed for workgroup {w} ({iam_err}), retrying with TIP client...")
             try:
                 records = create_history_day_for_workgroup(
-                    from_day, to_day, workgroup=w, athena_client=None
+                    day, workgroup=w, athena_client=idc_client
                 )
-                logger.info(f"Queries for workgroup {w} written: {records}")
+                logger.info(f"Queries for workgroup {w} written (via TIP): {records}")
                 total_records += records
-            except Exception as iam_err:
-                if idc_client is None:
-                    logger.warning(f"Skipping workgroup {w}: {iam_err}")
-                    skipped += 1
-                    continue
-                # IAM access failed — retry with TIP client
-                logger.info(f"IAM access failed for workgroup {w} ({iam_err}), retrying with TIP client...")
-                try:
-                    records = create_history_day_for_workgroup(
-                        from_day, to_day, workgroup=w, athena_client=idc_client
-                    )
-                    logger.info(f"Queries for workgroup {w} written (via TIP): {records}")
-                    total_records += records
-                except Exception as tip_err:
-                    logger.warning(f"Skipping workgroup {w}: IAM error: {iam_err} | TIP error: {tip_err}")
-                    skipped += 1
-    if exists > 0:
-        logger.info(f"Data existed for {exists} workgroups")
+            except Exception as tip_err:
+                logger.warning(f"Skipping workgroup {w}: IAM error: {iam_err} | TIP error: {tip_err}")
+                skipped += 1
     if skipped > 0:
         logger.warning(f"Skipped {skipped} workgroups due to access errors")
     return {
-        "from_day": from_day,
-        "to_day": to_day,
+        "day": day,
         "workgroups": len(workgroups),
-        "data-exists-workgroups": exists,
         "skipped-workgroups": skipped,
         "records": total_records,
     }
@@ -255,85 +236,47 @@ def upload_history_file(file_name: str, day: str, workgroup: str):
     logger.info(f"uploaded key: {key}")
 
 
-def create_history_day_for_workgroup(from_day: str, to_day: str, workgroup: str, athena_client=None) -> int:
-    current_day = to_day
-    current_day_rows = 0
-    total_rows = 0
+def create_history_day_for_workgroup(day: str, workgroup: str, athena_client=None) -> int:
+    rows = 0
     json_file = None
 
-    for query in get_query_executions_for_workgroup(workgroup, from_day, athena_client=athena_client):
+    for query in get_query_executions_for_workgroup(workgroup, day, athena_client=athena_client):
         query_day = get_query_exec_day(query)
-        if query_day < current_day or query_day < from_day:
-            if json_file:
-                json_file.close()
-                logger.info(f"Day: {current_day}, Total: {current_day_rows} rows")
-                total_rows += current_day_rows
-                current_day_rows = 0
-                upload_history_file(json_file.name, current_day, workgroup)
-                os.remove(json_file.name)
-                json_file = None
-                current_day = query_day
-        if current_day == query_day:
-            if json_file is None:
-                json_file = tempfile.NamedTemporaryFile(mode="w", delete=False)
-            if "Statistics" in query and "DataScannedInBytes" in query["Statistics"]:
-                data_scanned = query["Statistics"]["DataScannedInBytes"]
-            else:
-                data_scanned = 0
-            record = {
-                "query_id": query["QueryExecutionId"],
-                "query": query["Query"],
-                "data_scanned": data_scanned,
-                "status": query["Status"]["State"],
-                "state_change_reason": query["Status"].get("StateChangeReason", ""),
-                "submission_time": query["Status"].get("SubmissionDateTime", "").isoformat() if isinstance(query["Status"].get("SubmissionDateTime"), datetime) else "",
-                "workgroup": workgroup,
-            }
-            json_file.write(json.dumps(record))
-            json_file.write("\n")
-            current_day_rows += 1
-            if current_day_rows % 1000 == 0:
-                logger.info(f"Day: {current_day}, Written {current_day_rows} rows")
+        if query_day != day:
+            continue
+        if json_file is None:
+            json_file = tempfile.NamedTemporaryFile(mode="w", delete=False)
+        if "Statistics" in query and "DataScannedInBytes" in query["Statistics"]:
+            data_scanned = query["Statistics"]["DataScannedInBytes"]
+        else:
+            data_scanned = 0
+        record = {
+            "query_id": query["QueryExecutionId"],
+            "query": query["Query"],
+            "data_scanned": data_scanned,
+            "status": query["Status"]["State"],
+            "state_change_reason": query["Status"].get("StateChangeReason", ""),
+            "submission_time": query["Status"].get("SubmissionDateTime", "").isoformat() if isinstance(query["Status"].get("SubmissionDateTime"), datetime) else "",
+            "workgroup": workgroup,
+        }
+        json_file.write(json.dumps(record))
+        json_file.write("\n")
+        rows += 1
+        if rows % 1000 == 0:
+            logger.info(f"Day: {day}, Written {rows} rows")
     if json_file:
-        logger.info(f"Day: {current_day}, Total: {current_day_rows} rows")
-        total_rows += current_day_rows
+        logger.info(f"Day: {day}, Total: {rows} rows")
         json_file.close()
-        upload_history_file(json_file.name, current_day, workgroup)
-    return current_day_rows
-
-
-def validate_day_range(from_day: str, to_day: str):
-    if from_day > to_day:
-        raise ValueError(f"from_day: {from_day} is greater than to_day: {to_day}")
-    if (date.today() - datetime.strptime(from_day, "%Y-%m-%d").date()).days >= 45:
-        raise ValueError(
-            f"from_day: {from_day} is older than 45 days. Only 45 days are stored in Athena"
-        )
+        upload_history_file(json_file.name, day, workgroup)
+        os.remove(json_file.name)
+    return rows
 
 
 def lambda_handler(event, context):
-    if "day" in event:
-        from_day = event["day"]
-        to_day = event["day"]
-    elif "from_day" in event:
-        from_day = event["from_day"]
-        to_day = event.get("to_day", get_yesterday())
-    else:
-        # Default: resume from latest data in S3
-        latest = get_latest_day_in_s3(get_bucket(), get_location() + "/")
-        if latest:
-            from_day = latest
-            logger.info(f"Resuming from latest day in S3: {latest}")
-        else:
-            from_day = get_day_back(14)
-            logger.info(f"No existing data found in S3, backfilling from {from_day}")
-        to_day = get_yesterday()
-
-    validate_day_range(from_day, to_day)
-
-    logger.info(f"START. from day: {from_day}, to day: {to_day}")
-    result = create_history_days_range(
-        from_day, to_day, event.get("workgroup"), event.get("force", False)
+    day = event.get("day", get_yesterday())
+    logger.info(f"START. day: {day}")
+    result = create_history_day(
+        day, event.get("workgroup"), event.get("force", False)
     )
     logger.info(result)
     return result
