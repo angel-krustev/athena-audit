@@ -4,7 +4,7 @@ import logging
 import os
 import shutil
 import tempfile
-from datetime import datetime, date, timedelta
+from datetime import datetime, date
 from typing import List, Generator, Dict
 
 import boto3
@@ -186,28 +186,21 @@ def get_query_exec_day(query_exe: dict) -> date:
 
 
 def get_query_executions_for_workgroup(
-    workgroup: str, from_day: str, athena_client=None
+    workgroup: str, target_day: str, athena_client=None
 ) -> Generator[dict, None, None]:
     athena = athena_client or boto3.client("athena")
-    from_date = datetime.strptime(from_day, "%Y-%m-%d").date()
+    target_date = datetime.strptime(target_day, "%Y-%m-%d").date()
     paginator = athena.get_paginator("list_query_executions").paginate(WorkGroup=workgroup)
     for page in paginator:
         ids = page.get("QueryExecutionIds", [])
         if not ids:
             continue
         result = athena.batch_get_query_execution(QueryExecutionIds=ids)
-        found_older = False
         for query in result["QueryExecutions"]:
             if query["Status"]["State"] in ["SUCCEEDED", "FAILED", "CANCELLED"]:
                 query_day = get_query_exec_day(query)
-                if query_day is None:
-                    continue
-                if query_day >= from_date:
+                if query_day == target_date:
                     yield query
-                else:
-                    found_older = True
-        if found_older:
-            return
 
 
 def upload_history_file(file_name: str, day: str, workgroup: str):
@@ -229,16 +222,8 @@ def upload_history_file(file_name: str, day: str, workgroup: str):
 def create_history_day_for_workgroup(day: str, workgroup: str, athena_client=None) -> int:
     rows = 0
     json_file = None
-    target_date = datetime.strptime(day, "%Y-%m-%d").date()
     try:
-        # Pass the day before target to the generator so it pages past all of
-        # yesterday's queries even if batch_get_query_execution returns them
-        # out of order across page boundaries.
-        day_before = str(target_date - timedelta(days=1))
-        for query in get_query_executions_for_workgroup(workgroup, day_before, athena_client=athena_client):
-            query_day = get_query_exec_day(query)
-            if query_day is None or query_day != target_date:
-                continue
+        for query in get_query_executions_for_workgroup(workgroup, day, athena_client=athena_client):
             if json_file is None:
                 json_file = tempfile.NamedTemporaryFile(mode="w", delete=False)
             if "Statistics" in query and "DataScannedInBytes" in query["Statistics"]:
