@@ -196,6 +196,7 @@ def get_query_executions_for_workgroup(
         if not ids:
             continue
         result = athena.batch_get_query_execution(QueryExecutionIds=ids)
+        found_older = False
         for query in result["QueryExecutions"]:
             if query["Status"]["State"] in ["SUCCEEDED", "FAILED", "CANCELLED"]:
                 query_day = get_query_exec_day(query)
@@ -204,7 +205,9 @@ def get_query_executions_for_workgroup(
                 if query_day >= from_date:
                     yield query
                 else:
-                    return
+                    found_older = True
+        if found_older:
+            return
 
 
 def upload_history_file(file_name: str, day: str, workgroup: str):
