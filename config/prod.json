@@ -16,5 +16,8 @@
   "AthenaOutputBucket": "",
   "KmsKeyArn": "REPLACE_ME",
   "WorkgroupsFilter": "",
-  "IdcSecretArn": ""
+  "IdcSecretArn": "",
+  "FargateStackName": "",
+  "SubnetIds": "",
+  "SecurityGroupId": ""
 }

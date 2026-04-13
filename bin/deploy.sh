@@ -58,6 +58,11 @@ KMS_KEY_ARN="$(cfg KmsKeyArn)"
 WORKGROUPS_FILTER="$(cfg WorkgroupsFilter)"
 IDC_SECRET_ARN="$(cfg IdcSecretArn)"
 
+# Fargate config (optional — only deployed if FargateStackName is set)
+FARGATE_STACK_NAME="$(cfg FargateStackName 2>/dev/null || echo '')"
+SUBNET_IDS="$(cfg SubnetIds 2>/dev/null || echo '')"
+SECURITY_GROUP_ID="$(cfg SecurityGroupId 2>/dev/null || echo '')"
+
 ###############################################################################
 # Package
 ###############################################################################
@@ -140,3 +145,42 @@ aws lambda update-function-code \
 
 echo ""
 echo "=== Deployment complete (${ENV}) ==="
+
+###############################################################################
+# Deploy Fargate stack (optional)
+###############################################################################
+if [[ -n "${FARGATE_STACK_NAME}" ]]; then
+  echo ""
+  echo "=== Building and pushing Docker image ==="
+  ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+  ECR_REPO="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/${FARGATE_STACK_NAME}-history"
+  IMAGE_URI="${ECR_REPO}:${VERSION}"
+
+  # Create ECR repo if it doesn't exist (CloudFormation may not have run yet)
+  aws ecr describe-repositories --repository-names "${FARGATE_STACK_NAME}-history" --region "${REGION}" 2>/dev/null || \
+    aws ecr create-repository --repository-name "${FARGATE_STACK_NAME}-history" --region "${REGION}"
+
+  aws ecr get-login-password --region "${REGION}" | docker login --username AWS --password-stdin "${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com"
+  docker build --platform linux/arm64 -t "${IMAGE_URI}" "${PROJECT_ROOT}"
+  docker push "${IMAGE_URI}"
+
+  echo ""
+  echo "=== Deploying ${FARGATE_STACK_NAME} (${ENV}) ==="
+  aws cloudformation deploy \
+    --template-file "${PROJECT_ROOT}/cloudformation/athena_history_fargate_cloudformation.yaml" \
+    --stack-name "${FARGATE_STACK_NAME}" \
+    --region "${REGION}" \
+    --capabilities CAPABILITY_IAM \
+    --parameter-overrides \
+      AuditBucket="${AUDIT_BUCKET}" \
+      HistoryFolder="${HISTORY_FOLDER}" \
+      KmsKeyArn="${KMS_KEY_ARN}" \
+      WorkgroupsFilter="${WORKGROUPS_FILTER}" \
+      IdcSecretArn="${IDC_SECRET_ARN}" \
+      ImageUri="${IMAGE_URI}" \
+      SubnetIds="${SUBNET_IDS}" \
+      SecurityGroupId="${SECURITY_GROUP_ID}"
+
+  echo ""
+  echo "=== Fargate deployment complete (${ENV}) ==="
+fi

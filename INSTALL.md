@@ -153,6 +153,55 @@ This script:
 3. Deploys the History CloudFormation stack
 4. Deploys the Events CloudFormation stack
 5. Force-updates both Lambda function code
+6. *(If `FargateStackName` is set)* Builds the Docker image, pushes to ECR, and deploys the Fargate stack
+
+---
+
+## Step 3b: Deploy Fargate (optional)
+
+If your workloads exceed the 15-minute Lambda timeout, you can deploy the Fargate alternative.
+
+### 3b.1 Configure Fargate parameters
+
+Add the following to your config file:
+
+```json
+{
+  "FargateStackName": "athena-audit-history-fargate",
+  "SubnetIds": "subnet-abc123,subnet-def456",
+  "SecurityGroupId": "sg-0123456789abcdef0"
+}
+```
+
+| Parameter | Notes |
+|---|---|
+| `FargateStackName` | Stack name for the Fargate deployment. Leave empty to skip |
+| `SubnetIds` | Comma-separated subnet IDs. Must have internet access or VPC endpoints for S3, Athena, Secrets Manager, ECR |
+| `SecurityGroupId` | Security group allowing outbound HTTPS (port 443) |
+
+### 3b.2 Deploy
+
+Run `deploy.sh` as normal — it automatically detects `FargateStackName` and handles the Docker build/push and CloudFormation deployment:
+
+```bash
+./bin/deploy.sh sandbox
+```
+
+Or build and push the Docker image independently:
+
+```bash
+./bin/build_and_push.sh <environment> [version]
+```
+
+### 3b.3 Disable Lambda schedule (optional)
+
+If using Fargate instead of Lambda, disable the Lambda's EventBridge schedule to avoid duplicate runs:
+
+1. Go to **Amazon EventBridge → Rules**
+2. Find the rule created by the History Lambda stack
+3. **Disable** the rule
+
+Both the Lambda and Fargate schedules run at 01:00 UTC by default. Only one should be active at a time.
 
 ---
 
@@ -191,7 +240,7 @@ Repeat the process for each IAM user, role, or SSO role that needs to query the 
 
 ### 5a. Run the History Lambda
 
-Invoke the History Lambda with no payload — it will automatically backfill the last 14 days on first run:
+Invoke the History Lambda with no payload — it will automatically process yesterday's data:
 
 ```bash
 aws lambda invoke \
@@ -201,11 +250,11 @@ aws lambda invoke \
   /dev/stdout
 ```
 
-Or for a specific date range:
+Or for a specific date:
 ```bash
 aws lambda invoke \
   --function-name <history-stack-name>-AthenaHistoryLambdaFunction \
-  --payload '{"from_day": "2026-02-15", "to_day": "2026-03-01"}' \
+  --payload '{"day": "2026-03-01"}' \
   --region us-east-1 \
   /dev/stdout
 ```
@@ -234,48 +283,57 @@ SELECT * FROM athena_events.events ORDER BY event_time DESC LIMIT 20;
 
 ## Daily Operations
 
-Once deployed, both Lambdas run automatically every 2 hours via EventBridge:
+Once deployed, both Lambdas run automatically on a daily schedule via EventBridge:
 
 | Lambda | Schedule | Behavior |
 |---|---|---|
-| History | Every 2 hours | Finds the latest day in S3, re-processes from there to yesterday |
-| Events | Every 2 hours | Finds the latest day in the events table, re-processes from there to yesterday |
+| History | Daily at 01:00 UTC | Collects query metadata for yesterday from the Athena API |
+| Events | Daily at 02:00 UTC | Joins CloudTrail + History for yesterday, writes enriched Parquet |
 
 ### How It Works
 
-Each scheduled invocation receives an empty event (`{}`). With no parameters, the Lambda automatically:
-
-1. **History:** Scans S3 for the latest `day=` partition → uses it as `from_day`
-2. **Events:** Queries `SELECT MAX(day) FROM events` → uses it as `from_day`
-3. Re-processes from that day to yesterday (overlap catches partial data)
-4. On **first run** (no existing data), backfills the last **14 days**
+Each scheduled invocation receives an empty event (`{}`). With no parameters, the Lambda automatically processes **yesterday's** queries.
 
 Key properties:
-- **No gaps:** If a run fails, the next one picks up from the last successfully written data
+- **Simple:** Each run processes exactly one day (yesterday) — no state tracking needed
 - **Idempotent:** Re-processing a day replaces existing data — no duplicates
-- **Self-healing:** Late-arriving data or partial failures are caught by the next run
+- **Sequenced:** Events Lambda runs 1 hour after History Lambda, ensuring history data is available for the JOIN
 
 ### Manual Backfill
 
-To manually process specific dates, invoke the Lambda with `day` or `from_day`/`to_day`:
+To manually process specific dates, invoke the Lambda with a `day` parameter:
 
 ```bash
-# Single day
+# History — single day
 aws lambda invoke \
   --function-name <stack-name>-AthenaHistoryLambdaFunction \
   --payload '{"day": "2026-03-01"}' \
   --region us-east-1 /dev/stdout
 
-# Date range
+# Events — single day
 aws lambda invoke \
-  --function-name <stack-name>-AthenaHistoryLambdaFunction \
-  --payload '{"from_day": "2026-02-15", "to_day": "2026-03-01"}' \
+  --function-name <stack-name>-AthenaEventsLambdaFunction \
+  --payload '{"day": "2026-03-01"}' \
+  --region us-east-1 /dev/stdout
+
+# Events — force recreate tables and backfill 14 days
+aws lambda invoke \
+  --function-name <stack-name>-AthenaEventsLambdaFunction \
+  --payload '{"force_recreate": true}' \
   --region us-east-1 /dev/stdout
 ```
 
+> **Tip:** To backfill multiple days for history, invoke the Lambda once per day in a loop:
+> ```bash
+> for d in 2026-03-{01..07}; do
+>   aws lambda invoke --function-name <stack-name>-AthenaHistoryLambdaFunction \
+>     --payload "{\"day\": \"$d\"}" --region us-east-1 /dev/stdout
+> done
+> ```
+
 No manual intervention is needed unless:
 - IDC tokens expire (re-run `cihi-auth authenticate` + `create_idc_secret.sh`)
-- You need to backfill data for past days (invoke Lambdas manually with date range)
+- You need to backfill data for past days (invoke Lambdas manually with `day` parameter)
 - Tables need recreation after schema changes (`{"force_recreate": true}`)
 
 ---
@@ -331,9 +389,9 @@ SELECT * FROM athena_events.history LIMIT 10;
 
 **Fix:** Re-run the History Lambda with `force` to re-collect:
 ```json
-{"from_day": "YYYY-MM-DD", "to_day": "YYYY-MM-DD", "force": true}
+{"day": "YYYY-MM-DD", "force": true}
 ```
-Then re-run the Events Lambda for the same date range.
+Then re-run the Events Lambda for the same day.
 
 ### TIP authentication fails in Lambda
 
@@ -365,14 +423,14 @@ This drops and recreates all three tables with the current SQL definitions, then
 1. Re-grant Lake Formation permissions (new tables = new grants needed)
 2. Re-run History Lambda if history data needs the new schema fields
 
-### Lambda timeout (300 seconds)
+### Lambda timeout (900 seconds)
 
-**Cause:** Too many workgroups or too many queries to process in one invocation.
+**Cause:** Too many workgroups or too many queries to process in one invocation. The Athena API has no date filter, so the Lambda must page through all ~45 days of query history.
 
 **Fix:**
 1. Use `WorkgroupsFilter` to limit which workgroups are processed
-2. Process smaller date ranges instead of large backfills
-3. Increase the Lambda timeout in the CloudFormation template (max 900 seconds)
+2. Process individual workgroups: `{"day": "YYYY-MM-DD", "workgroup": "my-wg"}`
+3. Deploy the **Fargate alternative** (see Step 3b) — no timeout limit
 
 ### CloudTrail data missing for a day
 

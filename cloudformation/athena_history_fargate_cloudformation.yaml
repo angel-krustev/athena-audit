@@ -1,0 +1,334 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Athena History Fargate task with Step Functions scheduler.
+  Replaces the History Lambda when workloads exceed the 15-minute Lambda timeout.
+
+Parameters:
+  AuditBucket:
+    Type: String
+    Description: The S3 bucket to store athena audit output (history data)
+  HistoryFolder:
+    Type: String
+    Description: The S3 folder (path) to store history data under
+    Default: 'athena_audit/history'
+  KmsKeyArn:
+    Type: String
+    Description: The ARN of the KMS key used to encrypt S3 objects
+    Default: ''
+  WorkgroupsFilter:
+    Type: String
+    Description: Only process workgroups whose name contains this string (case-insensitive). Leave empty for all workgroups.
+    Default: ''
+  IdcSecretArn:
+    Type: String
+    Description: ARN of the Secrets Manager secret holding cihi_auth TIP tokens for IDC workgroup access. Leave empty to skip IDC workgroups.
+    Default: ''
+  ImageUri:
+    Type: String
+    Description: Full ECR image URI (e.g. 123456789012.dkr.ecr.us-east-1.amazonaws.com/athena-history:latest)
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Subnet IDs for the Fargate task (must have internet access or VPC endpoints for S3, Athena, etc.)
+  SecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: Security group for the Fargate task
+
+Conditions:
+  HasKmsKey: !Not [!Equals [!Ref KmsKeyArn, '']]
+  HasIdcSecret: !Not [!Equals [!Ref IdcSecretArn, '']]
+
+Resources:
+
+  # ---------- ECR Repository ----------
+  HistoryEcrRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub '${AWS::StackName}-history'
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep last 5 images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 5
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+
+  # ---------- ECS Cluster ----------
+  HistoryCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub '${AWS::StackName}-cluster'
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+
+  # ---------- Log Group ----------
+  HistoryLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/ecs/${AWS::StackName}-history'
+      RetentionInDays: 14
+
+  # ---------- Task Execution Role (pulls image, writes logs) ----------
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  # ---------- Task Role (what the container can do) ----------
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: HistoryTaskPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:DeleteObject
+                  - s3:GetObjectVersion
+                Resource: !Sub 'arn:aws:s3:::${AuditBucket}/${HistoryFolder}/region=${AWS::Region}/*'
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                  - s3:GetBucketLocation
+                Resource: !Sub 'arn:aws:s3:::${AuditBucket}'
+              - Effect: Allow
+                Action:
+                  - athena:ListWorkGroups
+                  - athena:GetWorkGroup
+                  - athena:ListQueryExecutions
+                  - athena:BatchGetQueryExecution
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    'aws:RequestedRegion': !Ref 'AWS::Region'
+              - !If
+                - HasKmsKey
+                - Effect: Allow
+                  Action:
+                    - kms:Decrypt
+                    - kms:Encrypt
+                    - kms:GenerateDataKey
+                    - kms:ReEncryptFrom
+                    - kms:ReEncryptTo
+                    - kms:DescribeKey
+                  Resource: !Ref KmsKeyArn
+                - !Ref 'AWS::NoValue'
+              - !If
+                - HasIdcSecret
+                - Effect: Allow
+                  Action:
+                    - secretsmanager:GetSecretValue
+                  Resource: !Ref IdcSecretArn
+                - !Ref 'AWS::NoValue'
+              - !If
+                - HasIdcSecret
+                - Effect: Allow
+                  Action:
+                    - sts:AssumeRole
+                  Resource:
+                    - !Sub 'arn:aws:iam::${AWS::AccountId}:role/idp-stack-*'
+                - !Ref 'AWS::NoValue'
+
+  # ---------- Task Definition ----------
+  HistoryTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub '${AWS::StackName}-history'
+      RequiresCompatibilities:
+        - FARGATE
+      RuntimePlatform:
+        CpuArchitecture: ARM64
+        OperatingSystemFamily: LINUX
+      NetworkMode: awsvpc
+      Cpu: '512'
+      Memory: '1024'
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      ContainerDefinitions:
+        - Name: history
+          Image: !Ref ImageUri
+          Essential: true
+          Environment:
+            - Name: AUDIT_BUCKET
+              Value: !Ref AuditBucket
+            - Name: HISTORY_FOLDER
+              Value: !Ref HistoryFolder
+            - Name: AWS_REGION
+              Value: !Ref 'AWS::Region'
+            - Name: WORKGROUPS_FILTER
+              Value: !Ref WorkgroupsFilter
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref HistoryLogGroup
+              awslogs-region: !Ref 'AWS::Region'
+              awslogs-stream-prefix: history
+
+  # ---------- Step Functions Role ----------
+  StepFunctionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: StepFunctionsEcsPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecs:RunTask
+                Resource: !Ref HistoryTaskDefinition
+              - Effect: Allow
+                Action:
+                  - ecs:StopTask
+                  - ecs:DescribeTasks
+                Resource: '*'
+                Condition:
+                  ArnEquals:
+                    'ecs:cluster': !GetAtt HistoryCluster.Arn
+              - Effect: Allow
+                Action:
+                  - iam:PassRole
+                Resource:
+                  - !GetAtt TaskExecutionRole.Arn
+                  - !GetAtt TaskRole.Arn
+              - Effect: Allow
+                Action:
+                  - events:PutTargets
+                  - events:PutRule
+                  - events:DescribeRule
+                Resource: !Sub 'arn:aws:events:${AWS::Region}:${AWS::AccountId}:rule/StepFunctionsGetEventsForECSTaskRule'
+
+  # ---------- Step Functions State Machine ----------
+  HistoryStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub '${AWS::StackName}-history'
+      RoleArn: !GetAtt StepFunctionsRole.Arn
+      DefinitionString: !Sub |
+        {
+          "Comment": "Run Athena History collection as a Fargate task",
+          "StartAt": "RunHistoryTask",
+          "States": {
+            "RunHistoryTask": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::ecs:runTask.sync",
+              "Parameters": {
+                "LaunchType": "FARGATE",
+                "Cluster": "${HistoryCluster.Arn}",
+                "TaskDefinition": "${HistoryTaskDefinition}",
+                "NetworkConfiguration": {
+                  "AwsvpcConfiguration": {
+                    "Subnets": ${SubnetIds},
+                    "SecurityGroups": ["${SecurityGroupId}"],
+                    "AssignPublicIp": "DISABLED"
+                  }
+                },
+                "Overrides": {
+                  "ContainerOverrides": [
+                    {
+                      "Name": "history",
+                      "Environment": [
+                        {
+                          "Name": "TARGET_DAY",
+                          "Value.$": "$.day"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              },
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 60,
+                  "MaxAttempts": 2,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        }
+
+  # ---------- EventBridge Scheduler Role ----------
+  SchedulerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeStateMachine
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - states:StartExecution
+                Resource: !Ref HistoryStateMachine
+
+  # ---------- Daily Schedule ----------
+  DailySchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: !Sub '${AWS::StackName}-daily'
+      ScheduleExpression: 'cron(0 1 * * ? *)'
+      ScheduleExpressionTimezone: UTC
+      FlexibleTimeWindow:
+        Mode: 'OFF'
+      Target:
+        Arn: !Ref HistoryStateMachine
+        RoleArn: !GetAtt SchedulerRole.Arn
+        Input: '{}'
+
+Outputs:
+  EcrRepositoryUri:
+    Description: ECR repository URI — use this to push the Docker image
+    Value: !GetAtt HistoryEcrRepository.RepositoryUri
+  ClusterName:
+    Description: ECS cluster name
+    Value: !Ref HistoryCluster
+  StateMachineArn:
+    Description: Step Functions state machine ARN — invoke manually for a specific day
+    Value: !Ref HistoryStateMachine

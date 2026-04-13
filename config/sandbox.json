@@ -16,5 +16,8 @@
   "AthenaOutputBucket": "aws-athena-query-results-991536801739-us-east-1-d4hh5d2j",
   "KmsKeyArn": "",
   "WorkgroupsFilter": "idc",
-  "IdcSecretArn": "arn:aws:secretsmanager:us-east-1:991536801739:secret:athena-audit/idc-tokens-JuAMvr"
+  "IdcSecretArn": "arn:aws:secretsmanager:us-east-1:991536801739:secret:athena-audit/idc-tokens-JuAMvr",
+  "FargateStackName": "",
+  "SubnetIds": "",
+  "SecurityGroupId": ""
 }
