@@ -1,6 +1,6 @@
 import logging
 import re
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, timezone
 from typing import Generator, Optional
 
 import boto3
@@ -10,7 +10,7 @@ logger = logging.getLogger()
 
 
 def get_day_back(back: int) -> str:
-    return str(date.today() - timedelta(back))
+    return str(datetime.now(timezone.utc).date() - timedelta(back))
 
 
 def get_yesterday() -> str:

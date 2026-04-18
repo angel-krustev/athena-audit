@@ -125,7 +125,7 @@ Resources:
       Runtime: 'python3.13'
       Architectures:
         - arm64
-      Timeout: 300
+      Timeout: 900
       Environment:
         Variables:
           AUDIT_BUCKET: !Ref AuditBucket

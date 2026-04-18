@@ -16,11 +16,14 @@ Installation is easy, and the tool is based on serverless technologies, so you d
 
 ## Installation
 
-The tool is very easy to install. Use the CloudFormation template to create the necessary resources. The template creates the following resources:
-- AWS Athena history collection Lambda function (per region)
-- AWS Athena events collection Lambda function (in a single main region)
+The tool is very easy to install. Use the CloudFormation templates to create the necessary resources:
+- **History Lambda** — Collects Athena query metadata daily at 01:00 UTC (per region)
+- **Events Lambda** — Joins CloudTrail + History into enriched Parquet daily at 02:00 UTC (single region)
+- **Fargate Task** *(optional)* — Alternative to the History Lambda for workloads exceeding the 15-minute Lambda timeout
 
-The CloudFormation templates can create the Lambda roles for you, or you can use an existing role. The tool operates across multiple regions, collecting data from all regions into a single table.
+The CloudFormation templates create the Lambda/Fargate roles for you. The tool operates across multiple regions, collecting data from all regions into a single table.
+
+See [INSTALL.md](INSTALL.md) for detailed setup instructions and [APP_DESIGN.md](APP_DESIGN.md) for the full architecture.
 
 ## Problem Articulation
 
@@ -37,8 +40,8 @@ Since the data is saved in two different sources, and the Athena history is acce
 
 A Python-based Lambda function which inserts daily data into the data lake. Here are the two main steps performed by the function:
 
-1. Read Athena history data through boto3 API and write objects to S3.
-2. Join the Athena history and Cloud Trail management logs and write the results to S3.
+1. Read Athena history data through boto3 API and write objects to S3 (History Lambda, daily at 01:00 UTC).
+2. Join the Athena history and Cloud Trail management logs and write the results to S3 (Events Lambda, daily at 02:00 UTC).
 
 Once the data is written to S3, you can query and analyze it using Athena. See the examples below.
 
@@ -69,26 +72,3 @@ GROUP BY user
 ORDER BY total_data_scanned_gb DESC
 LIMIT 100;
 ```
-NOTES:
-
-7z a -tzip athena_audit.zip *
-
-### Setup steps for ATHENA WGs with enabled IDC 
-Place the whl in bin:
-cp cihi_auth-2.0.0-py3-none-any.whl bin/
-cp cihi_auth-2.0.0-py3-none-any.whl bin/
-Authenticate with cihi_auth so token files exist locally
-Create the secret: bash bin/create_idc_secret.sh
-Copy the ARN into sandbox.json → IdcSecretArn
-Deploy: bash [deploy.sh](http://_vscodecontentref_/22) sandbox
-
-
-### RECREATE TABLES 
-Redeploy both stacks
-Run history Lambda first: {"day": "2026-03-01"} (re-collects with status field)
-Run events Lambda with: {"force_recreate": true, "day": "2026-03-01"} (recreates all tables with new schemas)
-### ERROR
-COLUMN_NOT_FOUND: line 1:8: Relation contains no accessible columns
-This query ran against the "athena_events" database, unless qualified by the query. Please post the error message on our forum  or contact customer support  with Query Id: c1842583-c3ff-44f6-9a9f-bb63bd82e3e2
-
-aws lakeformation get-data-lake-settings --region us-east-1 --output json
