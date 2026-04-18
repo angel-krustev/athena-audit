@@ -14,8 +14,7 @@ CREATE EXTERNAL TABLE {table} (
   status string,
   state_change_reason string,
   data_scanned bigint,
-  cost decimal(12,8),
-  classification_tier string)
+  cost decimal(12,8))
 PARTITIONED BY (
   region string,
   day string)

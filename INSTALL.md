@@ -234,6 +234,45 @@ Repeat the process for each IAM user, role, or SSO role that needs to query the 
 
 > ⚠️ **Important:** Make sure you grant access to the correct identity. If you log into the AWS Console via IAM Identity Center (SSO), the principal is the SSO assumed role, **not** the root account or an IAM user. Check the identity shown in the top-right corner of the console.
 
+### 4c. Grant LF-tag search permissions for classification
+
+The Events Lambda classifies queries by looking up `classification_tier` LF-tags. This requires **two** Lake Formation grants on the **Events Lambda role** (`AthenaEventsLambdaRole`):
+
+**Part A — LF-tag Describe** (permission on the tag itself):
+
+1. **Lake Formation → Data permissions → Grant**
+2. **Principal:** `AthenaEventsLambdaRole`
+3. **LF-tags:** Resource type = `LF-tag`, Tag key = `classification_tier`
+4. **Permissions:** `Describe`
+5. Click **Grant**
+
+**Part B — LFTagPolicy Describe** (permission to discover tables matched by the tag):
+
+1. **Lake Formation → Data permissions → Grant**
+2. **Principal:** `AthenaEventsLambdaRole`
+3. **Resources matched by LF-tags:** Resource type = `Tables`, Tag key = `classification_tier`, Tag values = *(all defined values, e.g. `tier_1`, `tier_2`, `tier_3`)*
+4. **Permissions:** `Describe`
+5. Click **Grant**
+
+CLI alternative (adjust `TagValues` to include all tiers defined in your LF-tag):
+```bash
+# Part A: LF-tag Describe
+aws lakeformation grant-permissions \
+  --principal '{"DataLakePrincipalIdentifier":"<AthenaEventsLambdaRole-ARN>"}' \
+  --resource '{"LFTag":{"TagKey":"classification_tier","TagValues":["tier_1","tier_2","tier_3"]}}' \
+  --permissions DESCRIBE \
+  --region us-east-1
+
+# Part B: LFTagPolicy TABLE Describe
+aws lakeformation grant-permissions \
+  --principal '{"DataLakePrincipalIdentifier":"<AthenaEventsLambdaRole-ARN>"}' \
+  --resource '{"LFTagPolicy":{"ResourceType":"TABLE","Expression":[{"TagKey":"classification_tier","TagValues":["tier_1","tier_2","tier_3"]}]}}' \
+  --permissions DESCRIBE \
+  --region us-east-1
+```
+
+> ⚠️ **Gotcha:** If only Part A is granted, `SearchTablesByLFTags` silently returns **zero results** (no error). Both parts are required.
+
 ---
 
 ## Step 5: Initial Data Load
@@ -288,7 +327,7 @@ Once deployed, both Lambdas run automatically on a daily schedule via EventBridg
 | Lambda | Schedule | Behavior |
 |---|---|---|
 | History | Daily at 01:00 UTC | Collects query metadata for yesterday from the Athena API |
-| Events | Daily at 02:00 UTC | Joins CloudTrail + History for yesterday, writes enriched Parquet |
+| Events | Daily at 02:00 UTC | Joins CloudTrail + History, classifies by LF-tag tier, writes enriched Parquet |
 
 ### How It Works
 
@@ -462,3 +501,75 @@ If using KMS encryption, ensure `KmsKeyArn` is set in your config.
 2. Grant the required permissions on your behalf
 
 To check who the LF admins are: **Lake Formation → Administrative roles and tasks → Data lake administrators**
+
+### SearchTablesByLFTags returns 0 results
+
+**Cause:** The Events Lambda role has the IAM `lakeformation:SearchTablesByLFTags` permission but is missing one or both Lake Formation grants for tag-based search.
+
+**Fix:** Two LF grants are required (see Step 4c):
+1. **LF-tag Describe** — permission on the tag key itself
+2. **LFTagPolicy TABLE Describe** — permission to discover tables matched by the tag expression
+
+If only the first grant is in place, `SearchTablesByLFTags` returns an empty list with **no error**. Events will still be written but `classification_tier` will be NULL for all.
+
+### COLUMN_NOT_FOUND on classification_tier
+
+**Possible causes:**
+
+1. **Lake Formation permissions:** The Events Lambda role doesn't have full LF access on the `events` table. Lake Formation masks authorization failures as "column not found" for security.
+   - **Fix:** Grant LF `SELECT`, `INSERT`, `ALTER`, `DESCRIBE`, `DROP`, `DELETE` on `athena_events.events` to the `AthenaEventsLambdaRole` (see Step 4b).
+
+2. **Schema mismatch:** The events table is missing the `classification_tier` column. The `force_recreate` option will recreate tables with the latest schema, or add it manually:
+   ```sql
+   ALTER TABLE athena_events.events ADD COLUMNS (classification_tier string);
+   ```
+
+---
+
+## Step 6: Classification Setup (optional)
+
+The Events Lambda automatically classifies queries by populating the `classification_tier` column in the `events` table. It uses a staging pattern: events are first written to an `events_staging` table, then promoted to `events` with the appropriate tier.
+
+### How it works
+
+1. `insert_data()` writes raw events into `events_staging` (no `classification_tier`)
+2. Discovers all tier values from the `classification_tier` LF-tag definition via `GetLFTag`
+3. Calls `SearchTablesByLFTags` to find all tables with any tier
+4. Reads staging events, extracts table references from SQL queries
+5. For each event, picks the highest (most sensitive) tier among referenced tables
+6. Promotes all events from `events_staging` to `events` with `classification_tier` populated
+7. Cleans up staging data
+
+### 6a. Create the LF-tag
+
+If you haven't already, create the LF-tag and assign it to tables:
+
+1. **Lake Formation → LF-tags → Add LF-tag**
+   - Key: `classification_tier`
+   - Values: `tier_1`, `tier_2`, etc.
+2. **Glue → Tables → select a table → Edit LF-tags**
+   - Assign `classification_tier = tier_1` to sensitive tables
+
+### 6b. Grant Lake Formation permissions
+
+Follow **Step 4c** to grant LF-tag search permissions to the `AthenaEventsLambdaRole`.
+
+> ⚠️ **Important:** The Events Lambda will run without errors even if LF-tag permissions are missing, but `classification_tier` will be NULL for all events. Check CloudWatch logs for "Found 0 tiered tables" to confirm grants are in place.
+
+### 6c. Verify
+
+Re-run the Events Lambda for a day when you know tiered tables were queried:
+
+```bash
+aws lambda invoke \
+  --function-name <events-stack-name>-AthenaEventsLambdaFunction \
+  --payload '{"day": "2026-03-01"}' \
+  --region us-east-1 \
+  /dev/stdout
+```
+
+Then query classified events:
+
+```sql
+SELECT * FROM athena_events.events WHERE classification_tier IS NOT NULL ORDER BY event_time DESC LIMIT 20;
+```

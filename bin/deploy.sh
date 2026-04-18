@@ -130,7 +130,7 @@ echo "=== Updating Lambda function code ==="
 
 HISTORY_FUNCTION="${HISTORY_STACK_NAME}-AthenaHistoryLambdaFunction"
 EVENTS_FUNCTION="${EVENTS_STACK_NAME}-AthenaEventsLambdaFunction"
-set -x
+#set -x
 aws lambda update-function-code \
   --function-name "${HISTORY_FUNCTION}" \
   --s3-bucket "${CODE_BUCKET}" \

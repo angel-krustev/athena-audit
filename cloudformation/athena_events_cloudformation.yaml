@@ -29,6 +29,10 @@ Parameters:
     Type: String
     Description: The S3 folder (path) to store history data under
     Default: 'athena_audit/events'
+  EventsStagingFolder:
+    Type: String
+    Description: The S3 folder (path) for staging events before classification
+    Default: 'athena_audit/events_staging'
   Version:
     Type: String
     Description: The version of the athena audit code
@@ -91,6 +95,7 @@ Resources:
                   - s3:GetObjectVersion
                 Resource:
                   - !Sub 'arn:aws:s3:::${AuditBucket}/${EventsFolder}/region=${AWS::Region}/*'
+                  - !Sub 'arn:aws:s3:::${AuditBucket}/${EventsStagingFolder}/region=${AWS::Region}/*'
                   - !Sub
                     - 'arn:aws:s3:::${OutputBucket}/${AthenaOutputFolder}/*'
                     - OutputBucket: !If [HasAthenaOutputBucket, !Ref AthenaOutputBucket, !Ref AuditBucket]
@@ -186,6 +191,8 @@ Resources:
               - Effect: Allow
                 Action:
                   - lakeformation:GetDataAccess
+                  - lakeformation:GetLFTag
+                  - lakeformation:SearchTablesByLFTags
                 Resource: '*'
 
 
@@ -212,6 +219,7 @@ Resources:
           CLOUD_TRAIL_BUCKET: !Ref CloudTrailBucket
           CLOUD_TRAIL_FOLDER: !Ref CloudTrailFolder
           EVENTS_FOLDER: !Ref EventsFolder
+          EVENTS_STAGING_FOLDER: !Ref EventsStagingFolder
           HISTORY_FOLDER: !Ref HistoryFolder
           ATHENA_OUTPUT_FOLDER: !Ref AthenaOutputFolder
           COST_PER_TB: !Ref CostPerTB
