@@ -194,6 +194,18 @@ def build_source_identity(email: str) -> str:
     return local_part.strip().lower()
 
 
+def pick_source_identity_seed(user: Dict) -> Optional[str]:
+    email = pick_email(user)
+    if email:
+        return email.strip().lower()
+
+    username = (user.get("UserName") or "").strip()
+    if username:
+        return username.lower()
+
+    return None
+
+
 def resolve_idc_user(identitystore_user: str) -> Optional[Dict[str, str]]:
     identity_store_id, user_id = parse_identitystore_user(identitystore_user)
     if not identity_store_id or not user_id:
@@ -210,17 +222,18 @@ def resolve_idc_user(identitystore_user: str) -> Optional[Dict[str, str]]:
         logger.warning("describe_user failed for %s: %s", identitystore_user, error)
         return None
 
-    email = pick_email(user)
-    if not email:
-        logger.warning("No email found in IDC profile for %s", identitystore_user)
+    source_identity_seed = pick_source_identity_seed(user)
+    if not source_identity_seed:
+        logger.warning("No email or username found in IDC profile for %s", identitystore_user)
         return None
 
-    email = email.strip().lower()
+    email = pick_email(user)
+    normalized_email = email.strip().lower() if email else ""
     return {
-        "source_identity": build_source_identity(email),
+        "source_identity": build_source_identity(source_identity_seed),
         "identitystore_user": identitystore_user,
         "display_name": (user.get("DisplayName") or "").strip(),
-        "email": email,
+        "email": normalized_email,
     }
 
 
