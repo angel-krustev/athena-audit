@@ -1,4 +1,5 @@
 import gzip
+import importlib
 import json
 import logging
 import os
@@ -38,7 +39,7 @@ def get_idc_athena_client():
     sm = boto3.client("secretsmanager")
     secret = json.loads(sm.get_secret_value(SecretId=secret_arn)["SecretString"])
 
-    # Write cihi_auth config files to /tmp (Lambda writable area)
+    # Write auth config files to /tmp (Lambda writable area)
     config_dir = "/tmp/.aws_cihi_auth"
     creds_dir = "/tmp/.aws_secure"
     aws_dir = "/tmp/.aws"
@@ -53,7 +54,7 @@ def get_idc_athena_client():
     with open(os.path.join(creds_dir, "idp_token.json"), "w") as f:
         json.dump(secret["tokens"], f)
 
-    # Write minimal AWS config so cihi_auth can write credentials
+    # Write minimal AWS config so auth module can write credentials
     with open(os.path.join(aws_dir, "config"), "w") as f:
         f.write("[default]\nregion = {}\noutput = json\n".format(
             os.environ.get("AWS_REGION", "us-east-1")
@@ -61,24 +62,57 @@ def get_idc_athena_client():
     with open(os.path.join(aws_dir, "credentials"), "w") as f:
         f.write("[default]\n")
 
-    # Point cihi_auth to /tmp as HOME so it finds ~/.aws_cihi_auth and ~/.aws_secure
+    # Point auth module to /tmp as HOME so it finds ~/.aws_cihi_auth and ~/.aws_secure
     os.environ["HOME"] = "/tmp"
 
-    # Create cihi-auth CLI wrapper (pip install -t doesn't create console scripts)
+    # Create CLI wrapper (pip install -t doesn't create console scripts).
+    # Prefer cihi_adapt_auth and fall back to cihi_auth for compatibility.
+    wrapper_module = None
+    for module_name in ["cihi_adapt_auth", "cihi_auth"]:
+        try:
+            importlib.import_module(module_name)
+            wrapper_module = module_name
+            break
+        except Exception:
+            continue
+    if wrapper_module is None:
+        wrapper_module = "cihi_adapt_auth"
+
     cli_path = "/tmp/cihi-auth"
     with open(cli_path, "w") as f:
-        f.write("#!/usr/bin/env python3\nimport sys\nsys.path.insert(0, '/var/task')\nfrom cihi_auth.main import cli\ncli()\n")
+        f.write(
+            "#!/usr/bin/env python3\n"
+            "import sys\n"
+            "sys.path.insert(0, '/var/task')\n"
+            f"from {wrapper_module}.main import cli\n"
+            "cli()\n"
+        )
     os.chmod(cli_path, 0o755)
     os.environ["PATH"] = "/tmp:" + os.environ.get("PATH", "")
 
     try:
-        from cihi_auth.jupyter_helper import authenticate, get_session
+        helper_module = None
+        auth_module_name = None
+        for module_name in ["cihi_adapt_auth", "cihi_auth"]:
+            try:
+                helper_module = importlib.import_module(f"{module_name}.jupyter_helper")
+                auth_module_name = module_name
+                break
+            except Exception:
+                continue
+
+        if helper_module is None:
+            raise ImportError("Neither cihi_adapt_auth nor cihi_auth is available")
+
+        authenticate = helper_module.authenticate
+        get_session = helper_module.get_session
+
         authenticate()
         session = get_session(profile="default")
         if session is None:
             for d in [config_dir, creds_dir, aws_dir]:
                 logger.warning(f"Contents of {d}: {os.listdir(d)}")
-            logger.warning("cihi_auth get_session() returned None — IDC workgroups will be skipped")
+            logger.warning(f"{auth_module_name} get_session() returned None — IDC workgroups will be skipped")
             return None
     except Exception as e:
         logger.warning(f"TIP authentication failed: {e} — IDC workgroups will be skipped")

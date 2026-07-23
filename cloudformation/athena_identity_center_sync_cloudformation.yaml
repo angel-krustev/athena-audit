@@ -1,0 +1,209 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Parameters:
+  AuditBucket:
+    Type: String
+    Description: The S3 bucket used for lookup table and Athena query outputs
+  CloudTrailBucket:
+    Type: String
+    Description: The S3 bucket where CloudTrail logs are stored for the stage view source table
+  CloudTrailFolder:
+    Type: String
+    Description: The S3 prefix where CloudTrail logs are stored
+  DatabaseName:
+    Type: String
+    Description: The database that contains the stage view and lookup table
+    Default: 's3_access_logs_db'
+  StageViewName:
+    Type: String
+    Description: Stage view used to discover missing source identities
+    Default: 's3_access_events_stage_view'
+  LookupTableName:
+    Type: String
+    Description: Lookup table that maps identitystore_user to source_identity
+    Default: 'identity_center_users'
+  LookupTableFolder:
+    Type: String
+    Description: S3 prefix for the Iceberg lookup table
+    Default: 'athena_audit/identity_center_users'
+  Workgroup:
+    Type: String
+    Description: Athena workgroup used by the sync Lambda
+    Default: 'primary'
+  WindowHours:
+    Type: String
+    Description: How many past hours to scan in the stage view
+    Default: '4'
+  IdentityStoreId:
+    Type: String
+    Description: Optional fallback Identity Store ID if identitystore_user does not include store/user format
+    Default: ''
+  Version:
+    Type: String
+    Description: The version of the athena audit code
+    Default: 'latest'
+  CodeBucket:
+    Type: String
+    Description: The S3 bucket where the Lambda code package is stored
+  AthenaOutputFolder:
+    Type: String
+    Description: The S3 folder for Athena query result files
+    Default: 'athena_audit/query_results'
+  AthenaOutputBucket:
+    Type: String
+    Description: The S3 bucket where Athena writes query result files. Defaults to AuditBucket if empty.
+    Default: ''
+  KmsKeyArn:
+    Type: String
+    Description: Optional KMS key ARN for S3 encryption
+    Default: ''
+
+Conditions:
+  HasAthenaOutputBucket: !Not [!Equals [!Ref AthenaOutputBucket, '']]
+  HasKmsKey: !Not [!Equals [!Ref KmsKeyArn, '']]
+
+Resources:
+  IdentityCenterSyncLogGroup:
+    Type: 'AWS::Logs::LogGroup'
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AWS::StackName}-IdentityCenterSyncLambdaFunction'
+      RetentionInDays: 14
+
+  IdentityCenterSyncLambdaRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: IdentityCenterSyncLambdaPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - athena:GetQueryExecution
+                  - athena:GetQueryResults
+                  - athena:GetWorkGroup
+                  - athena:StartQueryExecution
+                  - athena:StopQueryExecution
+                Resource:
+                  - !Sub 'arn:aws:athena:${AWS::Region}:${AWS::AccountId}:workgroup/${Workgroup}'
+                  - !Sub 'arn:aws:athena:${AWS::Region}:${AWS::AccountId}:datacatalog/*'
+                  - !Sub 'arn:aws:athena:${AWS::Region}:${AWS::AccountId}:database/${DatabaseName}'
+              - Effect: Allow
+                Action:
+                  - glue:GetDatabase
+                  - glue:GetTable
+                  - glue:GetTables
+                  - glue:CreateTable
+                  - glue:UpdateTable
+                Resource:
+                  - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog'
+                  - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/${DatabaseName}'
+                  - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/${DatabaseName}/*'
+              - Effect: Allow
+                Action:
+                  - lakeformation:GetDataAccess
+                  - lakeformation:GetLFTag
+                  - lakeformation:SearchTablesByLFTags
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                  - s3:GetBucketLocation
+                Resource:
+                  - !Sub 'arn:aws:s3:::${AuditBucket}'
+                  - !Sub 'arn:aws:s3:::${CloudTrailBucket}'
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:DeleteObject
+                Resource:
+                  - !Sub 'arn:aws:s3:::${AuditBucket}/${LookupTableFolder}/*'
+                  - !Sub 'arn:aws:s3:::${CloudTrailBucket}/${CloudTrailFolder}/*'
+                  - !Sub 'arn:aws:s3:::${CloudTrailBucket}/*'
+                  - !Sub
+                    - 'arn:aws:s3:::${OutputBucket}/${AthenaOutputFolder}/*'
+                    - OutputBucket: !If [HasAthenaOutputBucket, !Ref AthenaOutputBucket, !Ref AuditBucket]
+              - !If
+                - HasAthenaOutputBucket
+                - Effect: Allow
+                  Action:
+                    - s3:ListBucket
+                    - s3:GetBucketLocation
+                    - s3:PutObject
+                    - s3:GetObject
+                    - s3:DeleteObject
+                  Resource:
+                    - !Sub 'arn:aws:s3:::${AthenaOutputBucket}'
+                    - !Sub 'arn:aws:s3:::${AthenaOutputBucket}/${AthenaOutputFolder}/*'
+                - !Ref 'AWS::NoValue'
+              - !If
+                - HasKmsKey
+                - Effect: Allow
+                  Action:
+                    - kms:Decrypt
+                    - kms:Encrypt
+                    - kms:GenerateDataKey
+                    - kms:ReEncryptFrom
+                    - kms:ReEncryptTo
+                    - kms:DescribeKey
+                  Resource: !Ref KmsKeyArn
+                - !Ref 'AWS::NoValue'
+              - Effect: Allow
+                Action:
+                  - identitystore:DescribeUser
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}-IdentityCenterSyncLambdaFunction:*'
+
+  IdentityCenterSyncLambdaFunction:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-IdentityCenterSyncLambdaFunction'
+      Handler: 'identity_center_sync.lambda_handler'
+      Role: !GetAtt IdentityCenterSyncLambdaRole.Arn
+      Code:
+        S3Bucket: !Ref CodeBucket
+        S3Key: !Sub 'versions/${Version}/athena_audit.zip'
+      Runtime: 'python3.13'
+      Architectures:
+        - arm64
+      Timeout: 300
+      Environment:
+        Variables:
+          AUDIT_BUCKET: !Ref AuditBucket
+          ATHENA_OUTPUT_BUCKET: !If [HasAthenaOutputBucket, !Ref AthenaOutputBucket, !Ref AuditBucket]
+          ATHENA_OUTPUT_FOLDER: !Ref AthenaOutputFolder
+          DB_NAME: !Ref DatabaseName
+          WORKGROUP: !Ref Workgroup
+          WINDOW_HOURS: !Ref WindowHours
+          STAGE_VIEW_NAME: !Ref StageViewName
+          LOOKUP_TABLE_NAME: !Ref LookupTableName
+          LOOKUP_TABLE_LOCATION: !Sub 's3://${AuditBucket}/${LookupTableFolder}'
+          IDENTITY_STORE_ID: !Ref IdentityStoreId
+
+  IdentitySyncScheduleRule:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      ScheduleExpression: 'rate(2 hours)'
+      Targets:
+        - Arn: !GetAtt IdentityCenterSyncLambdaFunction.Arn
+          Id: 'IdentityCenterSyncLambdaFunctionTarget'
+          Input: '{}'
+
+  PermissionForEventsToInvokeIdentitySyncLambda:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      FunctionName: !Ref IdentityCenterSyncLambdaFunction
+      Action: 'lambda:InvokeFunction'
+      Principal: 'events.amazonaws.com'
+      SourceArn: !GetAtt IdentitySyncScheduleRule.Arn
