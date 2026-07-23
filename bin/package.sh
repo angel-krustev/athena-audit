@@ -22,11 +22,14 @@ trap "rm -rf ${BUILD_DIR}" EXIT
 cp "${PROJECT_ROOT}/src/"*.py "${BUILD_DIR}/"
 cp -r "${PROJECT_ROOT}/src/resources" "${BUILD_DIR}/resources"
 
-# Install cihi_auth whl if present (for IDC workgroup TIP authentication)
+# Install cihi_adapt_auth (or legacy cihi_auth) whl if present
 # boto3, botocore, requests, setuptools, awscli are excluded — provided by Lambda runtime or not needed
-WHL=$(find "${PROJECT_ROOT}/bin" -maxdepth 1 -name 'cihi_auth*.whl' 2>/dev/null | head -1)
+WHL=$(find "${PROJECT_ROOT}/bin" -maxdepth 1 -name 'cihi_adapt_auth*.whl' 2>/dev/null | head -1)
+if [[ -z "${WHL}" ]]; then
+  WHL=$(find "${PROJECT_ROOT}/bin" -maxdepth 1 -name 'cihi_auth*.whl' 2>/dev/null | head -1)
+fi
 if [[ -n "${WHL}" ]]; then
-  echo "Installing cihi_auth + dependencies from: $(basename "${WHL}")"
+  echo "Installing auth module + dependencies from: $(basename "${WHL}")"
   pip install "${WHL}" -t "${BUILD_DIR}" --quiet \
     --no-deps
   pip install "urllib3>=2.6.3, <3.0.0" "click>=8.1.7,<8.2" "PyJWT>=2.8.0,<3" "chardet>=5.2.0,<6" "requests>=2.31.0,<3" \
